@@ -377,6 +377,103 @@ PositionControlStates MulticopterPositionControl::set_vehicle_states(const vehic
 	return states;
 }
 
+// =============================================================================
+// Rangefinder-based PD altitude controller
+//
+// Control law (from internship report, adapted for PX4 NED convention):
+//
+//   acc_z_sp = -kp * (h_target - h_measured) + kd * vz
+//
+// Sign rationale (NED frame, Z positive downward):
+//   - If drone is BELOW target: (h_target - h_measured) > 0
+//     We want upward acceleration → acc_z_sp must be NEGATIVE (up in NED)
+//     → multiply by -kp
+//   - vz > 0 means drone is moving DOWN (toward ground, increasing h_measured)
+//     Damping should push back up → add +kd * vz
+//
+// The result is written into setpoint.acceleration[2], which PositionControl
+// routes directly to _accelerationControl(), bypassing the position/velocity
+// PID loop for the vertical axis only.
+// =============================================================================
+void MulticopterPositionControl::runRangefinderAltControl(trajectory_setpoint_s &setpoint, float vz)
+{
+    // Read latest distance sensor sample
+    distance_sensor_s dist{};
+
+    if (_distance_sensor_sub.updated()) {
+        _distance_sensor_sub.copy(&dist);
+
+        // Accept only downward-facing sensor with valid signal quality
+        // ROTATION_DOWNWARD_FACING = 25 (enum value in distance_sensor.h)
+        const bool facing_down  = (dist.orientation == distance_sensor_s::ROTATION_DOWNWARD_FACING);
+        // const bool quality_ok   = (dist.signal_quality > 0);
+        const bool range_ok     = (dist.current_distance >= dist.min_distance) &&
+                                  (dist.current_distance <= dist.max_distance);
+
+        // if (facing_down && quality_ok && range_ok) {
+        //     _rng_alt_measured  = dist.current_distance;
+        //     _rng_last_valid_ts = dist.timestamp;
+        // }
+
+	if (facing_down && range_ok) {
+            _rng_alt_measured  = dist.current_distance;
+            _rng_last_valid_ts = dist.timestamp;
+        }
+
+    }
+
+    // Sensor timeout check: if no valid reading in 500 ms, disable the controller
+    // to avoid commanding thrust based on stale data
+    const hrt_abstime now = hrt_absolute_time();
+    const bool sensor_valid = (now - _rng_last_valid_ts) < 500_ms;
+
+    if (!sensor_valid) {
+        // Sensor data is stale — do not touch the setpoint
+        // The standard PX4 controller will handle this cycle
+        return;
+    }
+
+    // On first valid reading, initialize the altitude target to current height
+    // This prevents a step command when the controller first activates
+    if (!PX4_ISFINITE(_rng_alt_target)) {
+        _rng_alt_target = 2.0f;
+    }
+
+    // --- PD control law ---
+    // altitude error: positive when drone is below target (needs to climb)
+    const float alt_error = _rng_alt_target - _rng_alt_measured;
+
+    // Read gains from parameters (tunable via QGC at runtime)
+    const float kp = _param_mpc_rng_alt_kp.get();
+    const float kd = _param_mpc_rng_alt_kd.get();
+
+    // Compute vertical acceleration setpoint in NED (negative = upward)
+    // -kp * alt_error: climb when below target
+    // -kd * vz:        damp downward motion (vz > 0 = moving down)
+    float acc_z_sp = -kp * alt_error - kd * vz;
+
+    // Saturate to a safe acceleration envelope to avoid violent corrections
+    // Limits: 8 m/s^2 up, 4 m/s^2 down (conservative for indoor testing)
+    acc_z_sp = math::constrain(acc_z_sp, -8.f, 4.f);
+
+    PX4_INFO("h=%.2f target=%.2f vz=%.2f acc=%.2f",
+	(double)_rng_alt_measured,
+	(double)_rng_alt_target,
+	(double)vz,
+	(double)acc_z_sp);
+
+    // Write into the trajectory setpoint's vertical acceleration field.
+    // When acceleration[2] is finite, PositionControl::_inputValid() accepts it
+    // and _accelerationControl() converts it directly to a thrust vector,
+    // bypassing the z position/velocity PID loop.
+    setpoint.acceleration[2] = acc_z_sp;
+
+    // Clear vertical position and velocity setpoints to avoid conflict.
+    // Horizontal fields are intentionally left unchanged.
+//     setpoint.position[2]   = NAN;
+//     setpoint.velocity[2]   = NAN;
+}
+
 void MulticopterPositionControl::Run()
 {
 	if (should_exit()) {
@@ -546,6 +643,18 @@ void MulticopterPositionControl::Run()
 				max_speed_xy,
 				math::min(speed_up, _param_mpc_z_vel_max_up.get()), // takeoff ramp starts with negative velocity limit
 				math::max(speed_down, 0.f));
+
+			// --- rangefinder altitude controller injection ---
+			// If enabled, override the vertical component of the setpoint
+			// with the output of the rangefinder PD controller.
+			// This runs AFTER flight task / trajectory setpoints are resolved
+			// but BEFORE the setpoint is handed to PositionControl, so all
+			// PX4 safety logic (failsafe, takeoff ramp, land detector) still
+			// runs normally on the unmodified horizontal setpoints.
+			if (_param_mpc_rng_alt_en.get() == 1) {
+				// Pass current vertical velocity (NED, positive = down)
+				runRangefinderAltControl(_setpoint, states.velocity(2));
+			}
 
 			_control.setInputSetpoint(_setpoint);
 

@@ -84,3 +84,45 @@ parameters:
       max: 2
       decimal: 2
       increment: 0.02
+
+    MPC_RNG_ALT_KP:
+      description:
+        short: Proportional gain for rangefinder-based altitude control
+        long: >
+          Gain applied to the altitude error (target - measured) from the
+          rangefinder. Produces a corrective vertical acceleration in m/s^2
+          per meter of altitude error. Only used when MPC_RNG_ALT_EN is true.
+      type: float
+      default: 3.0
+      min: 0.0
+      max: 10.0
+      decimal: 2
+      increment: 0.1
+
+    MPC_RNG_ALT_KD:
+      description:
+        short: Derivative gain for rangefinder-based altitude control
+        long: >
+          Gain applied to the vertical velocity to damp altitude overshoot.
+          Produces a corrective vertical acceleration in m/s^2 per m/s of
+          vertical velocity. Only used when MPC_RNG_ALT_EN is true.
+      type: float
+      default: 2.0
+      min: 0.0
+      max: 10.0
+      decimal: 2
+      increment: 0.1
+
+    MPC_RNG_ALT_EN:
+      description:
+        short: Enable rangefinder-based altitude controller
+        long: >
+          When enabled, replaces the standard vertical position/velocity loop
+          with a direct PD controller using the downward-facing rangefinder.
+          Horizontal control and all safety systems remain unaffected.
+          Requires a valid distance_sensor topic with
+          ROTATION_DOWNWARD_FACING.
+      type: int32
+      default: 0
+      min: 0
+      max: 1

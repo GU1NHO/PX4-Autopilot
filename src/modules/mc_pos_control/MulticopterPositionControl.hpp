@@ -67,6 +67,9 @@
 #include <uORB/topics/vehicle_land_detected.h>
 #include <uORB/topics/vehicle_local_position.h>
 #include <uORB/topics/vehicle_local_position_setpoint.h>
+// --- rangefinder altitude control ---
+// Include the uORB topic for downward-facing distance sensor (TF-Luna)
+#include <uORB/topics/distance_sensor.h>
 
 using namespace time_literals;
 
@@ -110,6 +113,19 @@ private:
 	uORB::Subscription _vehicle_constraints_sub{ORB_ID(vehicle_constraints)};
 	uORB::Subscription _vehicle_control_mode_sub{ORB_ID(vehicle_control_mode)};
 	uORB::Subscription _vehicle_land_detected_sub{ORB_ID(vehicle_land_detected)};
+
+	// --- rangefinder altitude control ---
+	// Subscription to the downward-facing distance sensor (e.g. TF-Luna)
+	uORB::Subscription _distance_sensor_sub{ORB_ID(distance_sensor)};
+
+	// Last valid rangefinder reading in meters (above ground)
+	float _rng_alt_measured{0.f};
+
+	// Altitude target held by the rangefinder controller (meters above ground)
+	float _rng_alt_target{NAN};
+
+	// Timestamp of the last valid distance_sensor message
+	hrt_abstime _rng_last_valid_ts{0};
 
 	hrt_abstime _time_stamp_last_loop{0};		/**< time stamp of last loop iteration */
 	hrt_abstime _time_position_control_enabled{0};
@@ -190,7 +206,12 @@ private:
 
 		(ParamFloat<px4::params::MPC_XY_ERR_MAX>) _param_mpc_xy_err_max,
 		(ParamFloat<px4::params::MPC_YAWRAUTO_MAX>) _param_mpc_yawrauto_max,
-		(ParamFloat<px4::params::MPC_YAWRAUTO_ACC>) _param_mpc_yawrauto_acc
+		(ParamFloat<px4::params::MPC_YAWRAUTO_ACC>) _param_mpc_yawrauto_acc,
+
+		// --- ADD: rangefinder altitude control parameters ---
+		(ParamFloat<px4::params::MPC_RNG_ALT_KP>) _param_mpc_rng_alt_kp,
+		(ParamFloat<px4::params::MPC_RNG_ALT_KD>) _param_mpc_rng_alt_kd,
+		(ParamInt<px4::params::MPC_RNG_ALT_EN>)   _param_mpc_rng_alt_en
 	);
 
 	math::WelfordMean<float> _sample_interval_s{};
@@ -256,4 +277,19 @@ private:
 	 */
 	void adjustSetpointForEKFResets(const vehicle_local_position_s &vehicle_local_position,
 					trajectory_setpoint_s &setpoint);
+
+
+	// --- rangefinder altitude control ---
+	/**
+	* Run the rangefinder-based PD altitude controller.
+	*
+	* Reads the latest distance_sensor message, computes a vertical
+	* acceleration setpoint using PD law, and writes it into the
+	* trajectory setpoint's acceleration[2] field.
+	* The horizontal setpoints are left untouched.
+	*
+	* @param setpoint  trajectory setpoint to modify in-place
+	* @param vz        current vertical velocity in NED frame (positive = down)
+	*/
+	void runRangefinderAltControl(trajectory_setpoint_s &setpoint, float vz);
 };
