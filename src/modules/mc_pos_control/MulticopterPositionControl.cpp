@@ -467,7 +467,7 @@ void MulticopterPositionControl::runRangefinderAltControl(trajectory_setpoint_s 
     // and _accelerationControl() converts it directly to a thrust vector,
     // bypassing the z position/velocity PID loop.
     setpoint.acceleration[2] = acc_z_sp;
-
+    // test
     // Clear vertical position and velocity setpoints to avoid conflict.
     // Horizontal fields are intentionally left unchanged.
 //     setpoint.position[2]   = NAN;
