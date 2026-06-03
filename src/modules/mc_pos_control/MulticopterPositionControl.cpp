@@ -395,83 +395,98 @@ PositionControlStates MulticopterPositionControl::set_vehicle_states(const vehic
 // routes directly to _accelerationControl(), bypassing the position/velocity
 // PID loop for the vertical axis only.
 // =============================================================================
-void MulticopterPositionControl::runRangefinderAltControl(trajectory_setpoint_s &setpoint, float vz)
+void MulticopterPositionControl::runRangefinderAltControl(trajectory_setpoint_s &setpoint)
 {
-    // Read latest distance sensor sample
+    // ---- sensor reading ----
     distance_sensor_s dist{};
 
     if (_distance_sensor_sub.updated()) {
         _distance_sensor_sub.copy(&dist);
 
-        // Accept only downward-facing sensor with valid signal quality
-        // ROTATION_DOWNWARD_FACING = 25 (enum value in distance_sensor.h)
-        const bool facing_down  = (dist.orientation == distance_sensor_s::ROTATION_DOWNWARD_FACING);
-        // const bool quality_ok   = (dist.signal_quality > 0);
-        const bool range_ok     = (dist.current_distance >= dist.min_distance) &&
-                                  (dist.current_distance <= dist.max_distance);
+        const bool facing_down = (dist.orientation == distance_sensor_s::ROTATION_DOWNWARD_FACING);
+        const bool range_ok    = (dist.current_distance >= dist.min_distance) &&
+                                 (dist.current_distance <= dist.max_distance);
 
-        // if (facing_down && quality_ok && range_ok) {
-        //     _rng_alt_measured  = dist.current_distance;
-        //     _rng_last_valid_ts = dist.timestamp;
-        // }
-
-	if (facing_down && range_ok) {
+        if (facing_down && range_ok) {
             _rng_alt_measured  = dist.current_distance;
             _rng_last_valid_ts = dist.timestamp;
         }
-
     }
 
-    // Sensor timeout check: if no valid reading in 500 ms, disable the controller
-    // to avoid commanding thrust based on stale data
-    const hrt_abstime now = hrt_absolute_time();
-    const bool sensor_valid = (now - _rng_last_valid_ts) < 500_ms;
-
-    if (!sensor_valid) {
-        // Sensor data is stale — do not touch the setpoint
-        // The standard PX4 controller will handle this cycle
+    if ((hrt_absolute_time() - _rng_last_valid_ts) >= 500_ms) {
         return;
     }
 
-    // On first valid reading, initialize the altitude target to current height
-    // This prevents a step command when the controller first activates
-    if (!PX4_ISFINITE(_rng_alt_target)) {
-        _rng_alt_target = 2.0f;
+    // ---- landing dead zone ----
+    // Below 0.3 m the controller backs off completely so the operator can land
+    // without the controller fighting back toward the setpoint.
+    // Takeoff is unaffected: the not_taken_off guard at the call site prevents
+    // this function from running until the PX4 rampup has already lifted off.
+    constexpr float LANDING_THRESHOLD = 0.3f;
+
+    if (_rng_alt_measured < LANDING_THRESHOLD) {
+        _rng_hold_target         = NAN;   // force re-capture after next liftoff
+        _rng_joystick_was_active = false;
+        return;
     }
 
-    // --- PD control law ---
-    // altitude error: positive when drone is below target (needs to climb)
-    const float alt_error = _rng_alt_target - _rng_alt_measured;
+    // ---- mode and joystick ----
+    const int   mode           = _param_mpc_rng_alt_mode.get();
+    const float vel_z_cmd      = setpoint.velocity[2];
+    const bool  joystick_active = PX4_ISFINITE(vel_z_cmd) && fabsf(vel_z_cmd) > 0.05f;
 
-    // Read gains from parameters (tunable via QGC at runtime)
-    const float kp = _param_mpc_rng_alt_kp.get();
-    const float kd = _param_mpc_rng_alt_kd.get();
+    float rng_alt_target;
 
-    // Compute vertical acceleration setpoint in NED (negative = upward)
-    // -kp * alt_error: climb when below target
-    // -kd * vz:        damp downward motion (vz > 0 = moving down)
-    float acc_z_sp = -kp * alt_error - kd * vz;
+    if (mode == 1) {
+        // ---- Hold mode ----
+        // Captures altitude on first activation or after a stale target (> 0,5 m
+        // from current position, e.g. re-enabled in mid-air at a different height).
+        if (!PX4_ISFINITE(_rng_hold_target) ||
+            fabsf(_rng_hold_target - _rng_alt_measured) > .5f) {
+            _rng_hold_target = _rng_alt_measured;
+        }
 
-    // Saturate to a safe acceleration envelope to avoid violent corrections
-    // Limits: 8 m/s^2 up, 4 m/s^2 down (conservative for indoor testing)
-    acc_z_sp = math::constrain(acc_z_sp, -8.f, 4.f);
+        if (joystick_active) {
+            // Pass throttle through; mark that we'll need to re-capture on release
+            _rng_joystick_was_active = true;
+            return;
+        }
 
-    PX4_INFO("h=%.2f target=%.2f vz=%.2f acc=%.2f",
-	(double)_rng_alt_measured,
-	(double)_rng_alt_target,
-	(double)vz,
-	(double)acc_z_sp);
+        // Stick just released: latch current altitude as the new hold target
+        if (_rng_joystick_was_active) {
+            _rng_hold_target = _rng_alt_measured;
+        }
 
-    // Write into the trajectory setpoint's vertical acceleration field.
-    // When acceleration[2] is finite, PositionControl::_inputValid() accepts it
-    // and _accelerationControl() converts it directly to a thrust vector,
-    // bypassing the z position/velocity PID loop.
-    setpoint.acceleration[2] = acc_z_sp;
-    // test
-    // Clear vertical position and velocity setpoints to avoid conflict.
-    // Horizontal fields are intentionally left unchanged.
-//     setpoint.position[2]   = NAN;
-//     setpoint.velocity[2]   = NAN;
+        _rng_joystick_was_active = false;
+        rng_alt_target           = _rng_hold_target;
+
+    } else {
+        // ---- Setpoint mode ----
+        // Tracks the fixed MPC_RNG_ALT_SP; throttle temporarily overrides.
+        if (joystick_active) {
+            return;
+        }
+
+        rng_alt_target = _param_mpc_rng_alt_sp.get();
+    }
+
+    // ---- outer P loop: altitude error → velocity setpoint ----
+    // The standard inner velocity PID (MPC_Z_VEL_P/I/D_ACC) converts this to
+    // thrust.  The velocity integrator stays alive → clean handoff on disable.
+    const float alt_error = rng_alt_target - _rng_alt_measured;
+    const float kp        = _param_mpc_rng_alt_kp.get();
+    const float vel_z_sp  = math::constrain(-kp * alt_error, -1.0f, 0.5f);
+
+    PX4_INFO("[rng m%d] h=%.2f tgt=%.2f err=%.2f vel=%.2f",
+             mode,
+             (double)_rng_alt_measured,
+             (double)rng_alt_target,
+             (double)alt_error,
+             (double)vel_z_sp);
+
+    setpoint.position[2]     = NAN;
+    setpoint.velocity[2]     = vel_z_sp;
+    setpoint.acceleration[2] = NAN;
 }
 
 void MulticopterPositionControl::Run()
@@ -651,9 +666,15 @@ void MulticopterPositionControl::Run()
 			// but BEFORE the setpoint is handed to PositionControl, so all
 			// PX4 safety logic (failsafe, takeoff ramp, land detector) still
 			// runs normally on the unmodified horizontal setpoints.
-			if (_param_mpc_rng_alt_en.get() == 1) {
-				// Pass current vertical velocity (NED, positive = down)
-				runRangefinderAltControl(_setpoint, states.velocity(2));
+			// Activate as soon as the takeoff ramp starts (TakeoffState >= rampup).
+			// The before_rampup phase keeps the ground-contact safety interlock
+			// (high downward acc, no thrust) intact — we never override that.
+			// Once rampup begins (triggered by a brief throttle input), the
+			// rangefinder takes over z and climbs autonomously to MPC_RNG_ALT_SP.
+			// Tilt is still limited to MPC_TILTMAX_LND during rampup (normal PX4
+			// takeoff behavior), then relaxes to MPC_TILTMAX_AIR in flight.
+			if (_param_mpc_rng_alt_en.get() == 1 && !not_taken_off) {
+				runRangefinderAltControl(_setpoint);
 			}
 
 			_control.setInputSetpoint(_setpoint);

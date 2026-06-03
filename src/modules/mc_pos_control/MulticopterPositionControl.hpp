@@ -121,8 +121,11 @@ private:
 	// Last valid rangefinder reading in meters (above ground)
 	float _rng_alt_measured{0.f};
 
-	// Altitude target held by the rangefinder controller (meters above ground)
-	float _rng_alt_target{NAN};
+	// Hold-mode dynamic altitude target (NAN = not yet initialized)
+	float _rng_hold_target{NAN};
+
+	// Tracks whether the vertical stick was active last cycle (hold mode)
+	bool _rng_joystick_was_active{false};
 
 	// Timestamp of the last valid distance_sensor message
 	hrt_abstime _rng_last_valid_ts{0};
@@ -208,10 +211,12 @@ private:
 		(ParamFloat<px4::params::MPC_YAWRAUTO_MAX>) _param_mpc_yawrauto_max,
 		(ParamFloat<px4::params::MPC_YAWRAUTO_ACC>) _param_mpc_yawrauto_acc,
 
-		// --- ADD: rangefinder altitude control parameters ---
-		(ParamFloat<px4::params::MPC_RNG_ALT_KP>) _param_mpc_rng_alt_kp,
-		(ParamFloat<px4::params::MPC_RNG_ALT_KD>) _param_mpc_rng_alt_kd,
-		(ParamInt<px4::params::MPC_RNG_ALT_EN>)   _param_mpc_rng_alt_en
+		// --- rangefinder altitude control parameters ---
+		(ParamFloat<px4::params::MPC_RNG_ALT_KP>)   _param_mpc_rng_alt_kp,
+		(ParamFloat<px4::params::MPC_RNG_ALT_KD>)   _param_mpc_rng_alt_kd,
+		(ParamInt<px4::params::MPC_RNG_ALT_EN>)     _param_mpc_rng_alt_en,
+		(ParamFloat<px4::params::MPC_RNG_ALT_SP>)   _param_mpc_rng_alt_sp,
+		(ParamInt<px4::params::MPC_RNG_ALT_MODE>)   _param_mpc_rng_alt_mode
 	);
 
 	math::WelfordMean<float> _sample_interval_s{};
@@ -291,5 +296,5 @@ private:
 	* @param setpoint  trajectory setpoint to modify in-place
 	* @param vz        current vertical velocity in NED frame (positive = down)
 	*/
-	void runRangefinderAltControl(trajectory_setpoint_s &setpoint, float vz);
+	void runRangefinderAltControl(trajectory_setpoint_s &setpoint);
 };

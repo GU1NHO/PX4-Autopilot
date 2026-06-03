@@ -87,27 +87,29 @@ parameters:
 
     MPC_RNG_ALT_KP:
       description:
-        short: Proportional gain for rangefinder-based altitude control
+        short: Outer-loop gain for rangefinder altitude controller
         long: >
-          Gain applied to the altitude error (target - measured) from the
-          rangefinder. Produces a corrective vertical acceleration in m/s^2
-          per meter of altitude error. Only used when MPC_RNG_ALT_EN is true.
+          Maps altitude error (target - measured) to a vertical velocity
+          setpoint in m/s. This outer P loop feeds the standard inner velocity
+          PID (MPC_Z_VEL_P/I/D_ACC), which computes thrust. Typical range:
+          1.0 - 2.0. Only used when MPC_RNG_ALT_EN is enabled.
       type: float
-      default: 3.0
+      default: 1.5
       min: 0.0
-      max: 10.0
+      max: 5.0
       decimal: 2
       increment: 0.1
 
     MPC_RNG_ALT_KD:
       description:
-        short: Derivative gain for rangefinder-based altitude control
+        short: Reserved - not used in current rangefinder controller
         long: >
-          Gain applied to the vertical velocity to damp altitude overshoot.
-          Produces a corrective vertical acceleration in m/s^2 per m/s of
-          vertical velocity. Only used when MPC_RNG_ALT_EN is true.
+          Previously used as derivative gain in a direct acceleration law.
+          The current implementation uses an outer-P / inner velocity-PID
+          architecture; velocity damping is provided by MPC_Z_VEL_D_ACC.
+          This parameter is kept for compatibility but has no effect.
       type: float
-      default: 2.0
+      default: 0.0
       min: 0.0
       max: 10.0
       decimal: 2
@@ -126,3 +128,32 @@ parameters:
       default: 0
       min: 0
       max: 1
+
+    MPC_RNG_ALT_MODE:
+      description:
+        short: Operating mode for rangefinder altitude controller
+        long: >
+          Selects the control mode when MPC_RNG_ALT_EN is enabled.
+          0 (Setpoint): drone tracks the fixed altitude defined by MPC_RNG_ALT_SP.
+          1 (Hold): drone holds the altitude it was at when the mode activated;
+          moving the throttle temporarily overrides the hold, and the new altitude
+          is captured when the throttle returns to center.
+      type: int32
+      default: 0
+      min: 0
+      max: 1
+
+    MPC_RNG_ALT_SP:
+      description:
+        short: Target altitude setpoint for rangefinder altitude controller
+        long: >
+          Desired altitude above ground in meters used by the rangefinder PD
+          controller when MPC_RNG_ALT_EN is enabled. Can be updated at runtime
+          from QGroundControl without recompiling the firmware.
+      type: float
+      default: 2.0
+      min: 0.1
+      max: 10.0
+      decimal: 2
+      increment: 0.1
+      unit: m
