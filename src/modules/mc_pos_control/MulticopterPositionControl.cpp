@@ -378,22 +378,34 @@ PositionControlStates MulticopterPositionControl::set_vehicle_states(const vehic
 }
 
 // =============================================================================
-// Rangefinder-based PD altitude controller
+// Rangefinder-based altitude controller
 //
-// Control law (from internship report, adapted for PX4 NED convention):
+// Architecture: outer P loop → inner velocity PID (cascade).
 //
-//   acc_z_sp = -kp * (h_target - h_measured) + kd * vz
+//   vel_z_sp = -kp * (h_target - h_measured)       [outer P, this function]
+//   thrust   = PID(vel_z_sp - vel_z)                [inner PID, PX4 standard]
 //
 // Sign rationale (NED frame, Z positive downward):
 //   - If drone is BELOW target: (h_target - h_measured) > 0
-//     We want upward acceleration → acc_z_sp must be NEGATIVE (up in NED)
+//     We want upward velocity → vel_z_sp must be NEGATIVE (up in NED)
 //     → multiply by -kp
-//   - vz > 0 means drone is moving DOWN (toward ground, increasing h_measured)
-//     Damping should push back up → add +kd * vz
 //
-// The result is written into setpoint.acceleration[2], which PositionControl
-// routes directly to _accelerationControl(), bypassing the position/velocity
-// PID loop for the vertical axis only.
+// The result is written into setpoint.velocity[2]. The standard PX4 velocity
+// PID (MPC_Z_VEL_P/I/D_ACC) converts it to thrust, keeping its integrator
+// alive so disabling the rangefinder hands off cleanly to the standard
+// altitude hold without integrator corruption.
+//
+// Two operating modes (MPC_RNG_ALT_MODE):
+//   0 - Setpoint: tracks the fixed altitude MPC_RNG_ALT_SP.
+//   1 - Hold: captures the current altitude on activation and on each
+//       throttle release, behaving like a rangefinder-based altitude hold.
+//
+// NOTE: an alternative implementation using direct acceleration setpoints
+// with a PD law (acc_z_sp = -kp*err - kd*vz) was also tested in SITL.
+// That approach bypasses the velocity loop entirely and produces faster
+// transient response, but it freezes the velocity integrator while active,
+// causing the standard altitude hold to misbehave after deactivation.
+// The velocity-setpoint cascade proved more robust for initial flight tests.
 // =============================================================================
 void MulticopterPositionControl::runRangefinderAltControl(trajectory_setpoint_s &setpoint)
 {
@@ -414,7 +426,34 @@ void MulticopterPositionControl::runRangefinderAltControl(trajectory_setpoint_s 
     }
 
     if ((hrt_absolute_time() - _rng_last_valid_ts) >= 500_ms) {
+        // Fire a MAVLink warning only on the first timeout cycle (edge trigger)
+        if (!_rng_timed_out) {
+            _rng_timed_out = true;
+            mavlink_log_warning(&_mavlink_log_pub,
+                "Rangefinder timeout - holding altitude\t");
+            PX4_WARN("[rng] sensor timeout: holding vel=0, throttle passthrough active");
+        }
+
+        // If the operator is actively moving the throttle, pass their input
+        // through so they can land normally.
+        // If the stick is centred, inject vel=0 to prevent the flight task's
+        // stale position reference from snapping the drone elsewhere.
+        const float vel_z_cmd_to = setpoint.velocity[2];
+        if (PX4_ISFINITE(vel_z_cmd_to) && fabsf(vel_z_cmd_to) > 0.05f) {
+            return;  // operator commanding: pass through unchanged
+        }
+        setpoint.position[2]     = NAN;
+        setpoint.velocity[2]     = 0.0f;
+        setpoint.acceleration[2] = NAN;
         return;
+    }
+
+    // Sensor just recovered after a timeout
+    if (_rng_timed_out) {
+        _rng_timed_out = false;
+        mavlink_log_info(&_mavlink_log_pub,
+            "Rangefinder recovered - resuming alt control\t");
+        PX4_INFO("[rng] sensor recovered: resuming altitude control");
     }
 
     // ---- landing dead zone ----
@@ -439,15 +478,19 @@ void MulticopterPositionControl::runRangefinderAltControl(trajectory_setpoint_s 
 
     if (mode == 1) {
         // ---- Hold mode ----
-        // Captures altitude on first activation or after a stale target (> 0,5 m
+        // Captures altitude on first activation or after a stale target (> 0.5 m
         // from current position, e.g. re-enabled in mid-air at a different height).
-        if (!PX4_ISFINITE(_rng_hold_target) ||
-            fabsf(_rng_hold_target - _rng_alt_measured) > .5f) {
+        const bool first_activation = !PX4_ISFINITE(_rng_hold_target) ||
+                                      fabsf(_rng_hold_target - _rng_alt_measured) > 0.5f;
+
+        if (first_activation) {
             _rng_hold_target = _rng_alt_measured;
+            mavlink_log_info(&_mavlink_log_pub,
+                "[rng] hold mode: target=%.2f m\t", (double)_rng_hold_target);
+            PX4_INFO("[rng] hold mode activated: target=%.2f m", (double)_rng_hold_target);
         }
 
         if (joystick_active) {
-            // Pass throttle through; mark that we'll need to re-capture on release
             _rng_joystick_was_active = true;
             return;
         }
@@ -455,6 +498,9 @@ void MulticopterPositionControl::runRangefinderAltControl(trajectory_setpoint_s 
         // Stick just released: latch current altitude as the new hold target
         if (_rng_joystick_was_active) {
             _rng_hold_target = _rng_alt_measured;
+            mavlink_log_info(&_mavlink_log_pub,
+                "[rng] hold updated: target=%.2f m\t", (double)_rng_hold_target);
+            PX4_INFO("[rng] hold target updated: %.2f m", (double)_rng_hold_target);
         }
 
         _rng_joystick_was_active = false;
@@ -477,12 +523,24 @@ void MulticopterPositionControl::runRangefinderAltControl(trajectory_setpoint_s 
     const float kp        = _param_mpc_rng_alt_kp.get();
     const float vel_z_sp  = math::constrain(-kp * alt_error, -1.0f, 0.5f);
 
-    PX4_INFO("[rng m%d] h=%.2f tgt=%.2f err=%.2f vel=%.2f",
-             mode,
-             (double)_rng_alt_measured,
-             (double)rng_alt_target,
-             (double)alt_error,
-             (double)vel_z_sp);
+    // Rate-limited operational log (~2 Hz) to avoid flooding the console
+    // and the MAVLink telemetry stream.
+    if (hrt_elapsed_time(&_rng_log_last_ts) > 500_ms) {
+        _rng_log_last_ts = hrt_absolute_time();
+        PX4_INFO("[rng m%d] h=%.2f tgt=%.2f err=%.2f vel=%.2f",
+                 mode,
+                 (double)_rng_alt_measured,
+                 (double)rng_alt_target,
+                 (double)alt_error,
+                 (double)vel_z_sp);
+        mavlink_log_info(&_mavlink_log_pub,
+                 "[rng m%d] h=%.2f tgt=%.2f err=%.2f vel=%.2f\t",
+                 mode,
+                 (double)_rng_alt_measured,
+                 (double)rng_alt_target,
+                 (double)alt_error,
+                 (double)vel_z_sp);
+    }
 
     setpoint.position[2]     = NAN;
     setpoint.velocity[2]     = vel_z_sp;

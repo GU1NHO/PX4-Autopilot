@@ -130,6 +130,12 @@ private:
 	// Timestamp of the last valid distance_sensor message
 	hrt_abstime _rng_last_valid_ts{0};
 
+	// True while sensor data is stale (used for edge-triggered MAVLink events)
+	bool _rng_timed_out{false};
+
+	// Rate-limiter for operational PX4_INFO logs (target: ~2 Hz)
+	hrt_abstime _rng_log_last_ts{0};
+
 	hrt_abstime _time_stamp_last_loop{0};		/**< time stamp of last loop iteration */
 	hrt_abstime _time_position_control_enabled{0};
 
