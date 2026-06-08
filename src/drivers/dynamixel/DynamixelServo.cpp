@@ -398,6 +398,11 @@ int DynamixelServo::custom_command(int argc, char *argv[])
 	return print_usage("unknown command");
 }
 
+extern "C" __EXPORT int dynamixel_servo_main(int argc, char *argv[])
+{
+	return ModuleBase::main(DynamixelServo::desc, argc, argv);
+}
+
 int DynamixelServo::print_usage(const char *reason)
 {
 	if (reason) {
