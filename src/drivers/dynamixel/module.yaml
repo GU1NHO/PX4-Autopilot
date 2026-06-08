@@ -1,0 +1,37 @@
+module_name: Dynamixel Servo Driver
+serial_config:
+  - command: dynamixel_servo start ${SERIAL_DEV} ${BAUD_PARAM}
+    port_config_param:
+      name: DXL_SER_CFG
+      group: Dynamixel
+
+actuator_output:
+  output_groups:
+    - param_prefix: DXL
+      channel_label: 'Servo'
+      standard_params:
+        disarmed: { min: 0, max: 4095, default: 2048 }
+        min: { min: 0, max: 4095, default: 0 }
+        max: { min: 0, max: 4095, default: 4095 }
+        failsafe: { min: 0, max: 4095 }
+      num_channels: 6
+
+parameters:
+  - group: Dynamixel Driver
+    definitions:
+      DXL_SERVO_CNT:
+        description:
+          short: Number of Dynamixel servos
+          long: Number of Dynamixel servos connected to the bus. Servos must have consecutive IDs starting from DXL_BASE_ID.
+        type: int32
+        default: 1
+        min: 1
+        max: 6
+      DXL_BASE_ID:
+        description:
+          short: ID of the first Dynamixel servo
+          long: The Dynamixel servo with this ID is mapped to output channel 1. Subsequent channels map to ID+1, ID+2, etc.
+        type: int32
+        default: 1
+        min: 1
+        max: 252

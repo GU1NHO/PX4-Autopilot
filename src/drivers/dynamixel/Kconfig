@@ -1,0 +1,5 @@
+menuconfig DRIVERS_DYNAMIXEL
+	bool "dynamixel_servo"
+	default n
+	---help---
+		Enable support for Dynamixel servo motors (Protocol 2.0) via UART
