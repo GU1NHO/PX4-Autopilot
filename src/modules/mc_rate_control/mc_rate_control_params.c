@@ -305,3 +305,18 @@ PARAM_DEFINE_INT32(MC_BAT_SCALE_EN, 0);
  * @group Multicopter Rate Control
  */
 PARAM_DEFINE_FLOAT(MC_YAW_TQ_CUTOFF, 2.f);
+
+/**
+ * Arm CoM feedforward torque hard limit per axis
+ *
+ * Clamps the manipulator centre-of-mass compensation torque received via
+ * debug_vect (name "armff") before it is added to the rate controller torque
+ * setpoint. Value is in normalized torque units [-1, 1]. Set to 0 to disable
+ * the feedforward entirely.
+ *
+ * @min 0
+ * @max 1
+ * @decimal 2
+ * @group Multicopter Rate Control
+ */
+PARAM_DEFINE_FLOAT(MC_ARMFF_LIM, 0.3f);

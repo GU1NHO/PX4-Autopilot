@@ -148,6 +148,24 @@ MulticopterRateControl::Run()
 
 		_vehicle_status_sub.update(&_vehicle_status);
 
+		// arm CoM feedforward: capture debug_vect samples with name == "armff".
+		// Freshness is stamped with the local hrt reception time, NOT the message
+		// timestamp: via DDS the message is stamped in ROS time, a different clock.
+		if (_debug_vect_sub.updated()) {
+			debug_vect_s debug_vect;
+
+			if (_debug_vect_sub.copy(&debug_vect)) {
+				char name[sizeof(debug_vect.name) + 1] {};
+				memcpy(name, debug_vect.name, sizeof(debug_vect.name));
+
+				if ((strcmp(name, "armff") == 0)
+				    && PX4_ISFINITE(debug_vect.x) && PX4_ISFINITE(debug_vect.y) && PX4_ISFINITE(debug_vect.z)) {
+					_arm_ff_torque = Vector3f(debug_vect.x, debug_vect.y, debug_vect.z);
+					_arm_ff_time = hrt_absolute_time();
+				}
+			}
+		}
+
 		// use rates setpoint topic
 		vehicle_rates_setpoint_s vehicle_rates_setpoint{};
 
@@ -221,6 +239,17 @@ MulticopterRateControl::Run()
 
 			// apply low-pass filtering on yaw axis to reduce high frequency torque caused by rotor acceleration
 			torque_setpoint(2) = _output_lpf_yaw.update(torque_setpoint(2), dt);
+
+			// add arm CoM feedforward torque (normalized), only while armed and in air,
+			// and only while fresh: a stale value (> 200 ms) contributes zero
+			if (_vehicle_control_mode.flag_armed && !_landed && !_maybe_landed
+			    && (hrt_elapsed_time(&_arm_ff_time) < 200_ms)) {
+				const float armff_lim = _param_mc_armff_lim.get();
+
+				for (int i = 0; i < 3; i++) {
+					torque_setpoint(i) += math::constrain(_arm_ff_torque(i), -armff_lim, armff_lim);
+				}
+			}
 
 			// publish rate controller status
 			rate_ctrl_status_s rate_ctrl_status{};
