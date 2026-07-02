@@ -131,6 +131,9 @@ subscriptions:
   - topic: /fmu/in/config_control_setpoints
     type: px4_msgs::msg::VehicleControlMode
 
+  - topic: /fmu/in/debug_vect
+    type: px4_msgs::msg::DebugVect
+
   - topic: /fmu/in/distance_sensor
     type: px4_msgs::msg::DistanceSensor
 
