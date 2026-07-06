@@ -21,16 +21,10 @@ from pathlib import Path
 import numpy as np
 import matplotlib.pyplot as plt
 
-# 3D projection requires mpl_toolkits.mplot3d to register successfully.
-# On systems with conflicting system/pip matplotlib installations this can fail.
-try:
-    from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
-    _HAS_3D = True
-except Exception:
-    _HAS_3D = False
+_GPS_FIX_LABELS = {0: "NO_GPS", 1: "NO_FIX", 2: "2D", 3: "3D", 4: "DGPS", 5: "RTK_F", 6: "RTK"}
 
 
-def _load_csv(path: Path) -> dict:
+def _load_csv(path: Path) -> list:
     rows = []
     with open(path, newline="") as f:
         reader = csv.DictReader(f)
@@ -154,6 +148,9 @@ def plot_and_analyse(csv_path: Path) -> None:
     print(f"  RMS 3D error:   {math.sqrt(np.mean(e3d**2)):.3f} m")
     print(f"  Mean perp error:{perp_errors.mean():.3f} m")
     print(f"  Max  perp error:{perp_errors.max():.3f} m")
+    if rows and "gps_num_satellites" in rows[0]:
+        gps_sat_arr = np.array([r["gps_num_satellites"] for r in rows])
+        print(f"  GPS satellites: min={int(gps_sat_arr.min())}  mean={gps_sat_arr.mean():.1f}  max={int(gps_sat_arr.max())}")
 
     segments = _segment_stats(rows, list(perp_errors))
     if segments:
@@ -165,25 +162,33 @@ def plot_and_analyse(csv_path: Path) -> None:
     fig = plt.figure(figsize=(14, 10))
     fig.suptitle(f"Flight Path Analysis — {csv_path.name}", fontsize=13)
 
-    # Subplot 1: 3D if available, otherwise side view (N × altitude)
-    if _HAS_3D:
-        ax1 = fig.add_subplot(2, 2, 1, projection="3d")
-        ax1.plot(dn, de, -dd, "b--", linewidth=1.5, label="Desired")
-        ax1.plot(an, ae, -ad, "r-",  linewidth=1.5, label="Actual")
-        ax1.set_xlabel("North (m)")
-        ax1.set_ylabel("East (m)")
-        ax1.set_zlabel("Up (m)")
-        ax1.set_title("3D Trajectory")
-        ax1.legend()
+    # GPS signal quality (top-left)
+    ax_gps = fig.add_subplot(2, 2, 1)
+    has_gps_cols = rows and "gps_num_satellites" in rows[0]
+    if has_gps_cols:
+        gps_sat = np.array([r["gps_num_satellites"] for r in rows])
+        gps_fix = np.array([r["gps_fix_type"] for r in rows])
+        ax_gps.plot(t, gps_sat, color="steelblue", linewidth=1.2, label="Satellites")
+        ax_gps.set_ylabel("Num Satellites", color="steelblue")
+        ax_gps.tick_params(axis="y", labelcolor="steelblue")
+        ax_gps.set_xlabel("Time (s)")
+        ax_gps.set_title("GPS Signal Quality")
+        ax_gps.grid(True)
+        ax_gps2 = ax_gps.twinx()
+        ax_gps2.step(t, gps_fix, color="darkorange", linewidth=1.0, where="post", label="Fix type", alpha=0.7)
+        ax_gps2.set_yticks(list(_GPS_FIX_LABELS.keys()))
+        ax_gps2.set_yticklabels(list(_GPS_FIX_LABELS.values()), fontsize=7)
+        ax_gps2.set_ylabel("Fix Type", color="darkorange")
+        ax_gps2.tick_params(axis="y", labelcolor="darkorange")
+        lines1, labels1 = ax_gps.get_legend_handles_labels()
+        lines2, labels2 = ax_gps2.get_legend_handles_labels()
+        ax_gps.legend(lines1 + lines2, labels1 + labels2, fontsize=8)
     else:
-        ax1 = fig.add_subplot(2, 2, 1)
-        ax1.plot(dn, -dd, "b--", linewidth=1.5, label="Desired")
-        ax1.plot(an, -ad, "r-",  linewidth=1.5, label="Actual")
-        ax1.set_xlabel("North (m)")
-        ax1.set_ylabel("Altitude (m)")
-        ax1.set_title("Side View N × Alt  (3D unavailable)")
-        ax1.legend()
-        ax1.grid(True)
+        ax_gps.text(0.5, 0.5, "GPS data not in CSV\n(re-run with updated script)",
+                    ha="center", va="center", transform=ax_gps.transAxes,
+                    fontsize=10, color="gray")
+        ax_gps.set_title("GPS Signal Quality")
+        ax_gps.axis("off")
 
     # Top-down (N x E)
     ax2d = fig.add_subplot(2, 2, 2)

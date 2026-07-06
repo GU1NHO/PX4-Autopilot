@@ -164,6 +164,7 @@ async def _execute_waypoints(
     CSV is always flushed on exit via the 'with open' context manager.
     """
     actual_pos = {"n": 0.0, "e": 0.0, "d": 0.0}
+    gps_info   = {"num_sat": 0, "fix_type": 0}
     stop_telem = asyncio.Event()
 
     async def _telem():
@@ -174,7 +175,15 @@ async def _execute_waypoints(
             if stop_telem.is_set():
                 return
 
-    telem_task = asyncio.create_task(_telem())
+    async def _gps_telem():
+        async for gi in drone.telemetry.gps_info():
+            gps_info["num_sat"]  = gi.num_satellites
+            gps_info["fix_type"] = int(gi.fix_type)
+            if stop_telem.is_set():
+                return
+
+    telem_task     = asyncio.create_task(_telem())
+    gps_telem_task = asyncio.create_task(_gps_telem())
     try:
         await asyncio.sleep(0.2)
         interp = [actual_pos["n"], actual_pos["e"], actual_pos["d"]]
@@ -189,6 +198,7 @@ async def _execute_waypoints(
                 "desired_N_m", "desired_E_m", "desired_D_m",
                 "actual_N_m",  "actual_E_m",  "actual_D_m",
                 "error_3d_m",
+                "gps_num_satellites", "gps_fix_type",
             ])
 
             for i, wp in enumerate(waypoints):
@@ -220,6 +230,7 @@ async def _execute_waypoints(
                         f"{target[0]:.4f}", f"{target[1]:.4f}", f"{target[2]:.4f}",
                         f"{an:.4f}", f"{ae:.4f}", f"{ad:.4f}",
                         f"{error:.4f}",
+                        gps_info["num_sat"], gps_info["fix_type"],
                     ])
 
                     if error < acceptance_radius and dist_to_target < 1e-3:
@@ -231,6 +242,7 @@ async def _execute_waypoints(
     finally:
         stop_telem.set()
         telem_task.cancel()
+        gps_telem_task.cancel()
 
 
 async def run(
