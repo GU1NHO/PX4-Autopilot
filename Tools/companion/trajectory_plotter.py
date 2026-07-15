@@ -190,13 +190,25 @@ def plot_and_analyse(csv_path: Path) -> None:
         ax_gps.set_title("GPS Signal Quality")
         ax_gps.axis("off")
 
-    # Top-down (N x E)
+    # Top-down — body frame (fwd × right) if available, else NED
     ax2d = fig.add_subplot(2, 2, 2)
-    ax2d.plot(de, dn, "b--", linewidth=1.5, label="Desired")
-    ax2d.plot(ae, an, "r-",  linewidth=1.5, label="Actual")
-    ax2d.set_xlabel("East (m)")
-    ax2d.set_ylabel("North (m)")
-    ax2d.set_title("Top-down (N × E)")
+    has_body_cols = rows and "desired_fwd_m" in rows[0]
+    if has_body_cols:
+        d_fwd   = np.array([r["desired_fwd_m"]   for r in rows])
+        d_right = np.array([r["desired_right_m"]  for r in rows])
+        a_fwd   = np.array([r["actual_fwd_m"]     for r in rows])
+        a_right = np.array([r["actual_right_m"]   for r in rows])
+        ax2d.plot(d_right, d_fwd, "b--", linewidth=1.5, label="Desired")
+        ax2d.plot(a_right, a_fwd, "r-",  linewidth=1.5, label="Actual")
+        ax2d.set_xlabel("Right (m)")
+        ax2d.set_ylabel("Forward (m)")
+        ax2d.set_title("Top-down — Body Frame")
+    else:
+        ax2d.plot(de, dn, "b--", linewidth=1.5, label="Desired")
+        ax2d.plot(ae, an, "r-",  linewidth=1.5, label="Actual")
+        ax2d.set_xlabel("East (m)")
+        ax2d.set_ylabel("North (m)")
+        ax2d.set_title("Top-down (N × E)")
     ax2d.legend()
     ax2d.set_aspect("equal")
     ax2d.grid(True)

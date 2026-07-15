@@ -1,6 +1,6 @@
 # Flight Path Follower
 
-Companion computer scripts to send a predefined NED flight path to a PX4 drone in Offboard mode and compare the desired vs actual trajectory.
+Companion computer scripts to send a predefined flight path to a PX4 drone in Offboard mode and compare the desired vs actual trajectory.
 
 ## Requirements
 
@@ -13,76 +13,74 @@ pip install mavsdk pyyaml matplotlib numpy
 | Script | Role |
 |--------|------|
 | `flight_path_follower.py` | Connects to PX4, sends position setpoints, logs desired+actual to CSV |
-| `trajectory_plotter.py`   | Reads CSV and generates 3D/2D plots + tracking error metrics |
-| `waypoints_example.yaml`  | Example square path (5m × 5m at 2m altitude) |
+| `trajectory_plotter.py`   | Reads CSV and generates plots + tracking error metrics |
+| `waypoints_example.yaml`  | Example square path (5m × 5m) in body frame |
 
 ## Connection
 
-The radio telemetry on TELEM1 is already used by QGroundControl.
-QGC forwards MAVLink to UDP 14550 by default — the script connects there:
+| Environment | Command |
+|-------------|---------|
+| SITL (Gazebo) | `python3 flight_path_follower.py` (default `udpin://0.0.0.0:14540`) |
+| Real hardware | `python3 flight_path_follower.py --connection udpin://0.0.0.0:14552` |
 
-```bash
-python3 flight_path_follower.py  # default: udp://:14550
-```
-
-If QGC does **not** forward (check in *Application Settings → MAVLink → Forward MAVLink*), use `mavlink-router` to multiplex the serial port:
-
-```bash
-# Install: sudo apt install mavlink-router
-mavlink-router /dev/ttyUSB0:57600 \
-  --endpoint udp-server:0.0.0.0:14550 \
-  --endpoint udp-server:0.0.0.0:14551
-# QGC connects to 14550, script connects to 14551:
-python3 flight_path_follower.py --connection udp://:14551
-```
+**Real hardware setup:** enable MAVLink forwarding in QGC to port 14552:
+*Application Settings → MAVLink → Forward MAVLink to Host → `localhost:14552`*
 
 ## Step-by-step flight procedure
 
 1. Connect the drone, open QGroundControl.
-2. **Start the script** (before arming):
+2. **Start the script** (before or after arming):
    ```bash
+   # SITL
    python3 flight_path_follower.py --waypoints waypoints_example.yaml
+
+   # Real hardware
+   python3 flight_path_follower.py --connection udpin://0.0.0.0:14552 --waypoints waypoints_example.yaml
    ```
 3. Script prints `Waiting for GPS lock...` then `Waiting for drone to be armed and airborne`.
-4. **Arm and take off manually** in Position mode. Climb to the desired altitude (≥ 2 m for the example path).
-5. **Switch to Offboard mode** via QGC (*Flight Mode → Offboard*) or your RC aux switch.
-6. Script starts executing waypoints and prints real-time progress + error.
+4. **Arm and take off manually** in Position mode. Climb to the desired altitude.
+5. **Switch to Offboard mode** via QGC (*Flight Mode → Offboard*) or RC aux switch.
+   - At that moment the script captures position and heading and transforms the waypoints.
+6. Script executes waypoints and prints real-time progress + error.
 7. After the last waypoint is reached, script holds that position — **land manually**.
 8. Script saves `flight_YYYYMMDD_HHMMSS.csv` in the current directory.
+
+## Define your own path
+
+Edit `waypoints_example.yaml`. Waypoints are in **drone body frame** at the moment Offboard is activated:
+
+```yaml
+acceptance_radius: 0.5   # metres — when to advance to next waypoint
+speed_ms: 0.4            # setpoint speed (m/s) — keep low for precision
+
+waypoints:
+  # [forward_m, right_m, up_m]
+  #   forward > 0 → ahead    right > 0 → right    up > 0 → climb
+  - [5.0,  0.0, 0.0]   # 5m ahead
+  - [5.0,  5.0, 0.0]   # 5m ahead, 5m right
+  - [0.0,  5.0, 0.0]   # 5m right
+  - [0.0,  0.0, 0.0]   # return to start
+```
+
+`up = 0` maintains current altitude. The script rotates the path using the drone's heading at Offboard activation, so the square always executes in front of the drone regardless of which way it is pointing.
 
 ## Analyse the trajectory
 
 ```bash
-python3 trajectory_plotter.py flight_20240617_143000.csv
+python3 trajectory_plotter.py flight_YYYYMMDD_HHMMSS.csv
 ```
 
 Outputs:
-- **3D plot**: desired (blue dashed) vs actual (red solid)
-- **Top-down plot** (N × E)
+- **GPS signal quality**: satellites count and fix type over time
+- **Top-down plot** in body frame (Forward × Right) — the path always appears aligned
 - **Altitude over time**
 - **Tracking error over time**: 3D Euclidean distance and perpendicular distance to desired segment
-- **Console summary**: max error, RMS, per-segment mean/max
-
-## Define your own path
-
-Edit `waypoints_example.yaml` or create a new YAML file:
-
-```yaml
-acceptance_radius: 0.5   # metres — when to advance to next waypoint
-
-waypoints:
-  # [North_m, East_m, Down_m]   Down is NEGATIVE to go UP (NED convention)
-  - [10.0,  0.0, -3.0]   # 10m North, 3m altitude
-  - [10.0, 10.0, -3.0]
-  - [ 0.0, 10.0, -3.0]
-  - [ 0.0,  0.0, -3.0]
-```
-
-Pass it with `--waypoints my_path.yaml`.
+- **Console summary**: max error, RMS, per-segment mean/max, GPS satellite stats
 
 ## Safety notes
 
 - Always keep the RC transmitter ready to switch back to Position mode.
-- The script **does not arm or disarm** the drone — arming/takeoff/landing are always manual.
-- If the script is killed, PX4 will detect the loss of Offboard setpoints and switch to failsafe (default: Hold mode). Tune `COM_OF_LOSS_T` in QGC to adjust the timeout.
+- The script **does not arm, disarm, or take off** — these are always manual.
+- If GPS position is lost, the script stops sending setpoints and PX4 activates the failsafe configured in `COM_OBL_RC_ACT` (recommended: Altitude mode).
+- If the script exits or is killed, PX4 detects loss of Offboard setpoints after `COM_OF_LOSS_T` seconds and switches to failsafe.
 - Test in a safe open area at low altitude first.

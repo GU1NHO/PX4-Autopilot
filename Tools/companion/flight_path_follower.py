@@ -46,6 +46,13 @@ def _distance_3d(a: tuple, b: tuple) -> float:
     return math.sqrt(sum((x - y) ** 2 for x, y in zip(a, b)))
 
 
+def _to_body(n: float, e: float, n0: float, e0: float, cos_y: float, sin_y: float) -> tuple:
+    """Convert absolute NED position to body-frame (fwd, right) relative to origin."""
+    rel_n = n - n0
+    rel_e = e - e0
+    return rel_n * cos_y + rel_e * sin_y, -rel_n * sin_y + rel_e * cos_y
+
+
 async def _wait_for_gps(drone: System) -> None:
     print("Waiting for GPS lock...")
     async for health in drone.telemetry.health():
@@ -156,6 +163,7 @@ async def _execute_waypoints(
     acceptance_radius: float,
     speed_ms: float,
     yaw_deg: float,
+    origin_ned: tuple,
     csv_path: Path,
     abort: asyncio.Event,
 ) -> None:
@@ -163,6 +171,10 @@ async def _execute_waypoints(
     Aborts early if abort is set (GPS failure or mode change).
     CSV is always flushed on exit via the 'with open' context manager.
     """
+    n0, e0, _ = origin_ned
+    yaw_rad = math.radians(yaw_deg)
+    cos_y, sin_y = math.cos(yaw_rad), math.sin(yaw_rad)
+
     actual_pos = {"n": 0.0, "e": 0.0, "d": 0.0}
     gps_info   = {"num_sat": 0, "fix_type": 0}
     stop_telem = asyncio.Event()
@@ -199,6 +211,8 @@ async def _execute_waypoints(
                 "actual_N_m",  "actual_E_m",  "actual_D_m",
                 "error_3d_m",
                 "gps_num_satellites", "gps_fix_type",
+                "desired_fwd_m", "desired_right_m",
+                "actual_fwd_m",  "actual_right_m",
             ])
 
             for i, wp in enumerate(waypoints):
@@ -225,12 +239,16 @@ async def _execute_waypoints(
                     an, ae, ad = actual_pos["n"], actual_pos["e"], actual_pos["d"]
                     error = _distance_3d((an, ae, ad), target)
 
+                    d_fwd, d_right = _to_body(target[0], target[1], n0, e0, cos_y, sin_y)
+                    a_fwd, a_right = _to_body(an, ae, n0, e0, cos_y, sin_y)
                     writer.writerow([
                         f"{time.time():.3f}",
                         f"{target[0]:.4f}", f"{target[1]:.4f}", f"{target[2]:.4f}",
                         f"{an:.4f}", f"{ae:.4f}", f"{ad:.4f}",
                         f"{error:.4f}",
                         gps_info["num_sat"], gps_info["fix_type"],
+                        f"{d_fwd:.4f}", f"{d_right:.4f}",
+                        f"{a_fwd:.4f}", f"{a_right:.4f}",
                     ])
 
                     if error < acceptance_radius and dist_to_target < 1e-3:
@@ -307,7 +325,7 @@ async def run(
 
     try:
         await _execute_waypoints(
-            drone, ned_waypoints, acceptance_radius, speed_ms, yaw_deg, csv_path, abort
+            drone, ned_waypoints, acceptance_radius, speed_ms, yaw_deg, origin, csv_path, abort
         )
 
         # CSV is already saved (file closed by 'with open' inside _execute_waypoints)

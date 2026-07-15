@@ -7,12 +7,12 @@
 # The script captures position and heading at Offboard activation and
 # rotates/translates these into absolute NED before executing.
 
-acceptance_radius: 0.5
+acceptance_radius: 0.1
 speed_ms: 0.4        # setpoint moves at this speed toward each waypoint (m/s)
 
 waypoints:
   # Square path in front of the drone, at current altitude
-  - [5.0,  0.0,  0.0]   # 5m ahead
-  - [5.0,  5.0,  0.0]   # 5m ahead, 5m right
-  - [0.0,  5.0,  0.0]   # 5m right
+  - [3.0,  0.0,  0.0]   # 5m ahead
+  - [3.0,  3.0,  0.0]   # 5m ahead, 5m right
+  - [0.0,  3.0,  0.0]   # 5m right
   - [0.0,  0.0,  0.0]   # return to start
