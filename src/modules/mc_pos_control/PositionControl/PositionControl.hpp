@@ -81,14 +81,17 @@ public:
 	PositionControl() = default;
 	~PositionControl() = default;
 
-	// SE(3) geometric controller gains (Lee2010, mass-normalized: kx [1/s^2], kv [1/s]).
-	// Hardcoded tuning knobs for now (no PX4 params yet). Defaults are the PX4 cascade
-	// equivalents (kx = MPC_*_P * MPC_*_VEL_P_ACC, kv = MPC_*_VEL_P_ACC);
-	// the paper uses kx = 16, kv = 5.6 (much more aggressive).
-	static constexpr float SE3_KX_XY = 1.7f;
+	// SE(3) geometric controller gains (Lee2010, mass-normalized: kx [1/s^2], kv [1/s]),
+	// tunable per axis. Hardcoded tuning knobs for now (no PX4 params yet).
+	// PX4 cascade equivalents: kx = MPC_*_P * MPC_*_VEL_P_ACC, kv = MPC_*_VEL_P_ACC
+	// (iris: kx 1.7/1.7/4.0, kv 1.8/1.8/4.0); the paper uses kx = 16, kv = 5.6.
+	static constexpr float SE3_KX_X = 1.7f;
+	static constexpr float SE3_KX_Y = 1.7f;
 	static constexpr float SE3_KX_Z = 4.0f;
-	static constexpr float SE3_KV_XY = 1.8f;
+	static constexpr float SE3_KV_X = 1.8f;
+	static constexpr float SE3_KV_Y = 1.8f;
 	static constexpr float SE3_KV_Z = 4.0f;
+
 
 	/**
 	 * Set the SE(3) controller gains, overriding the hardcoded defaults
@@ -197,9 +200,9 @@ private:
 	void _se3TranslationalControl(); ///< SE(3) geometric translational control (Lee2010 eqs. 12, 15)
 
 	// Gains
-	matrix::Vector3f _gain_kx{SE3_KX_XY, SE3_KX_XY, SE3_KX_Z}; ///< Position error gain [1/s^2]
-	matrix::Vector3f _gain_kv{SE3_KV_XY, SE3_KV_XY, SE3_KV_Z}; ///< Velocity error gain [1/s]
-	matrix::Vector3f _gain_kx_over_kv{SE3_KX_XY / SE3_KV_XY, SE3_KX_XY / SE3_KV_XY, SE3_KX_Z / SE3_KV_Z}; ///< kx/kv, position error to implied velocity setpoint
+	matrix::Vector3f _gain_kx{SE3_KX_X, SE3_KX_Y, SE3_KX_Z}; ///< Position error gain [1/s^2]
+	matrix::Vector3f _gain_kv{SE3_KV_X, SE3_KV_Y, SE3_KV_Z}; ///< Velocity error gain [1/s]
+	matrix::Vector3f _gain_kx_over_kv{SE3_KX_X / SE3_KV_X, SE3_KX_Y / SE3_KV_Y, SE3_KX_Z / SE3_KV_Z}; ///< kx/kv, position error to implied velocity setpoint
 
 	// Limits
 	float _lim_vel_horizontal{}; ///< Horizontal velocity limit with feed forward and position control

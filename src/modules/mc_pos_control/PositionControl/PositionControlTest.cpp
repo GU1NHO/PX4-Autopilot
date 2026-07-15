@@ -419,8 +419,70 @@ TEST_F(PositionControlBasicTest, IntegratorWindupWithInvalidSetpoint)
 	Vector3f(0.f, 0.f, 0.f).copyTo(_input_setpoint.velocity);
 	EXPECT_TRUE(runController());
 
-	// THEN: the integral did not wind up and produce unexpected deviation
+	// THEN: no state accumulated across the invalid run produces unexpected deviation
 	Eulerf euler_att(Quatf(_attitude.q_d));
 	EXPECT_FLOAT_EQ(euler_att.phi(), 0.f);
 	EXPECT_FLOAT_EQ(euler_att.theta(), 0.f);
+}
+
+TEST_F(PositionControlBasicTest, HoverEquilibrium)
+{
+	// GIVEN: zero position and velocity error at level attitude
+	Vector3f(0.f, 0.f, 0.f).copyTo(_input_setpoint.position);
+	Vector3f(0.f, 0.f, 0.f).copyTo(_input_setpoint.velocity);
+
+	// WHEN: we run the controller
+	EXPECT_TRUE(runController());
+
+	// THEN: the output is exactly the hover thrust pointing up with level attitude
+	EXPECT_FLOAT_EQ(_output_setpoint.thrust[0], 0.f);
+	EXPECT_FLOAT_EQ(_output_setpoint.thrust[1], 0.f);
+	EXPECT_FLOAT_EQ(_output_setpoint.thrust[2], -.5f);
+	Eulerf euler_att(Quatf(_attitude.q_d));
+	EXPECT_FLOAT_EQ(euler_att.phi(), 0.f);
+	EXPECT_FLOAT_EQ(euler_att.theta(), 0.f);
+}
+
+TEST_F(PositionControlBasicTest, MeasuredBodyZProjection)
+{
+	// GIVEN: zero tracking error but the vehicle is rolled by 30 degrees
+	PositionControlStates states{};
+	states.attitude = Quatf(Eulerf(math::radians(30.f), 0.f, 0.f));
+	_position_control.setState(states);
+
+	Vector3f(0.f, 0.f, 0.f).copyTo(_input_setpoint.position);
+	Vector3f(0.f, 0.f, 0.f).copyTo(_input_setpoint.velocity);
+
+	// WHEN: we run the controller
+	EXPECT_TRUE(runController());
+
+	// THEN: the collective thrust is the projection of the desired specific force
+	// onto the measured body z axis: hover_thrust * cos(30deg) (Lee2010 eq. 15)
+	const float expected_thrust = .5f * cosf(math::radians(30.f));
+	EXPECT_FLOAT_EQ(_attitude.thrust_body[2], -expected_thrust);
+	EXPECT_FLOAT_EQ(Vector3f(_output_setpoint.thrust).norm(), expected_thrust);
+
+	// and the attitude setpoint stays level because the tracking error is zero
+	Eulerf euler_att(Quatf(_attitude.q_d));
+	EXPECT_FLOAT_EQ(euler_att.phi(), 0.f);
+	EXPECT_FLOAT_EQ(euler_att.theta(), 0.f);
+}
+
+TEST_F(PositionControlBasicTest, PurePDNoIntegral)
+{
+	// GIVEN: a constant position error
+	Vector3f(1.f, 0.f, 0.f).copyTo(_input_setpoint.position);
+
+	// WHEN: we run the controller once and then many more times with the same input
+	EXPECT_TRUE(runController());
+	const Vector3f thrust_first(_output_setpoint.thrust);
+
+	for (int i = 0; i < 100; i++) {
+		EXPECT_TRUE(runController());
+	}
+
+	const Vector3f thrust_last(_output_setpoint.thrust);
+
+	// THEN: the output does not drift over time (no integral action)
+	EXPECT_EQ(thrust_first, thrust_last);
 }
