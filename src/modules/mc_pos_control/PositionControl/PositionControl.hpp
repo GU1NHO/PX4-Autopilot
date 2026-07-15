@@ -145,7 +145,9 @@ public:
 	 * @param setpoint setpoints including feed-forwards to execute in update()
 	 */
 	void setInputSetpoint(const trajectory_setpoint_s &setpoint);
-
+void _customPositionVelocityControl(float dt);
+void _geometricAccelerationControl();
+matrix::Vector3f _acc_ff{NAN, NAN, NAN};
 	/**
 	 * Apply P-position and PID-velocity controller that updates the member
 	 * thrust, yaw- and yawspeed-setpoints.
@@ -162,12 +164,6 @@ public:
 	 * @see _vel_int
 	 */
 	void resetIntegral() { _vel_int.setZero(); }
-	void resetIntegralXY() { _vel_int.xy() = matrix::Vector2f(); }
-
-	/**
-	 * If set, the tilt setpoint is computed by assuming no vertical acceleration
-	 */
-	void decoupleHorizontalAndVecticalAcceleration(bool val) { _decouple_horizontal_and_vertical_acceleration = val; }
 
 	/**
 	 * Get the controllers output local position setpoint
@@ -217,7 +213,6 @@ private:
 	float _lim_tilt{}; ///< Maximum tilt from level the output attitude is allowed to have
 
 	float _hover_thrust{}; ///< Thrust [HOVER_THRUST_MIN, HOVER_THRUST_MAX] with which the vehicle hovers not accelerating down or up with level orientation
-	bool _decouple_horizontal_and_vertical_acceleration{true}; ///< Ignore vertical acceleration setpoint to remove its effect on the tilt setpoint
 
 	// States
 	matrix::Vector3f _pos; /**< current position */

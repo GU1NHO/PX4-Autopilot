@@ -1,5 +1,10 @@
 /****************************************************************************
  *
+ *   Copyright (c) 2018 - 2019 PX4 Development Team.
+ *
+ ****************************************************************************/
+/****************************************************************************
+ *
  *   Copyright (c) 2018 - 2019 PX4 Development Team. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -110,116 +115,159 @@ bool PositionControl::update(const float dt)
 	bool valid = _inputValid();
 
 	if (valid) {
-		_positionControl();
-		_velocityControl(dt);
+
+		_customPositionVelocityControl(dt);
 
 		_yawspeed_sp = PX4_ISFINITE(_yawspeed_sp) ? _yawspeed_sp : 0.f;
-		_yaw_sp = PX4_ISFINITE(_yaw_sp) ? _yaw_sp : _yaw; // TODO: better way to disable yaw control
+		_yaw_sp = PX4_ISFINITE(_yaw_sp) ? _yaw_sp : _yaw;
 	}
 
-	// There has to be a valid output acceleration and thrust setpoint otherwise something went wrong
 	return valid && _acc_sp.isAllFinite() && _thr_sp.isAllFinite();
 }
 
-void PositionControl::_positionControl()
+void PositionControl::_customPositionVelocityControl(const float dt)
 {
-	// P-position controller
-	Vector3f vel_sp_position = (_pos_sp - _pos).emult(_gain_pos_p);
-	// Position and feed-forward velocity setpoints or position states being NAN results in them not having an influence
-	ControlMath::addIfNotNanVector3f(_vel_sp, vel_sp_position);
-	// make sure there are no NAN elements for further reference while constraining
-	ControlMath::setZeroIfNanVector3f(vel_sp_position);
+	(void)dt;
 
-	// Constrain horizontal velocity by prioritizing the velocity component along the
-	// the desired position setpoint over the feed-forward term.
-	_vel_sp.xy() = ControlMath::constrainXY(vel_sp_position.xy(), (_vel_sp - vel_sp_position).xy(), _lim_vel_horizontal);
-	// Constrain velocity in z-direction.
-	_vel_sp(2) = math::constrain(_vel_sp(2), -_lim_vel_up, _lim_vel_down);
-}
+	Vector3f pos_error;
+	Vector3f vel_error;
+	Vector3f acc_ff;
+	Vector3f acc_sp_custom;
+const float acc_xy_max = 5.0f;
+const float acc_z_max_up = 4.0f;
+const float acc_z_max_down = 3.0f;
+	pos_error.setZero();
+	vel_error.setZero();
+	acc_ff.setZero();
+	acc_sp_custom.setZero();
 
-void PositionControl::_velocityControl(const float dt)
-{
-	// Constrain vertical velocity integral
-	_vel_int(2) = math::constrain(_vel_int(2), -CONSTANTS_ONE_G, CONSTANTS_ONE_G);
-
-	// PID velocity control
-	Vector3f vel_error = _vel_sp - _vel;
-	Vector3f acc_sp_velocity = vel_error.emult(_gain_vel_p) + _vel_int - _vel_dot.emult(_gain_vel_d);
-
-	// No control input from setpoints or corresponding states which are NAN
-	ControlMath::addIfNotNanVector3f(_acc_sp, acc_sp_velocity);
-
-	_accelerationControl();
-
-	// Integrator anti-windup in vertical direction
-	if ((_thr_sp(2) >= -_lim_thr_min && vel_error(2) >= 0.f) ||
-	    (_thr_sp(2) <= -_lim_thr_max && vel_error(2) <= 0.f)) {
-		vel_error(2) = 0.f;
+	for (int i = 0; i < 3; i++) {
+		if (PX4_ISFINITE(_acc_sp(i))) {
+			acc_ff(i) = _acc_sp(i);
+		}
 	}
 
-	// Prioritize vertical control while keeping a horizontal margin
+	for (int i = 0; i < 3; i++) {
+		if (PX4_ISFINITE(_pos_sp(i)) && PX4_ISFINITE(_pos(i))) {
+			pos_error(i) = _pos_sp(i) - _pos(i);
+		}
+	}
+
+	for (int i = 0; i < 3; i++) {
+		if (PX4_ISFINITE(_vel_sp(i)) && PX4_ISFINITE(_vel(i))) {
+			vel_error(i) = _vel_sp(i) - _vel(i);
+		}
+	}
+
+	// Custom gains
+	const Vector3f Kp_custom(2.0f, 2.0f, 3.0f);
+	const Vector3f Kd_custom(1.8f, 3.0f, 2.0f);
+
+	// a_sp = Kp*ep + Kd*ev + a_sd
+	acc_sp_custom =
+		pos_error.emult(Kp_custom)
+		+ vel_error.emult(Kd_custom)
+		+ acc_ff;
+
+
+Vector2f acc_xy(acc_sp_custom(0), acc_sp_custom(1));
+
+if (acc_xy.norm() > acc_xy_max) {
+	acc_xy = acc_xy / acc_xy.norm() * acc_xy_max;
+	acc_sp_custom(0) = acc_xy(0);
+	acc_sp_custom(1) = acc_xy(1);
+}
+
+acc_sp_custom(2) = math::constrain(
+	acc_sp_custom(2),
+	-acc_z_max_up,
+	acc_z_max_down
+);
+
+	_acc_sp = acc_sp_custom;
+
+	//_accelerationControl();
+
+	// Geometric inverse dynamics
+	_geometricAccelerationControl();
+	// Keep PX4 thrust saturation logic
+}
+void PositionControl::_geometricAccelerationControl()
+{
+	const Vector3f e3(0.f, 0.f, 1.f);
+
+	/*
+	 * Translational dynamics in PX4 NED/FRD:
+	 *
+	 * m*a_sp = m*g*e3 - f*b3
+	 *
+	 * Therefore:
+	 *
+	 * f*b3 = m*(g*e3 - a_sp)
+	 */
+
+	Vector3f specific_thrust_direction =
+		CONSTANTS_ONE_G * e3 - _acc_sp;
+
+	/*
+	 * specific_thrust_direction =
+	 * [-a_sp_x, -a_sp_y, g - a_sp_z]
+	 */
+
+	if (specific_thrust_direction.norm_squared() < 1e-6f) {
+		specific_thrust_direction = e3;
+	}
+
+	Vector3f body_z = specific_thrust_direction.normalized();
+
+	// Limit desired tilt
+	ControlMath::limitTilt(body_z, e3, _lim_tilt);
+
+	/*
+	 * PX4 uses normalized thrust.
+	 *
+	 * At hover:
+	 * ||g*e3 - a_sp|| = g
+	 * collective_thrust = -hover_thrust
+	 */
+
+	float collective_thrust =
+		-_hover_thrust *
+		(specific_thrust_direction.dot(body_z) / CONSTANTS_ONE_G);
+
+	// Minimum thrust limit
+	collective_thrust = math::min(collective_thrust, -_lim_thr_min);
+
+	// Desired normalized thrust vector
+	_thr_sp = body_z * collective_thrust;
+
+	// PX4 thrust saturation logic
 	const Vector2f thrust_sp_xy(_thr_sp);
 	const float thrust_sp_xy_norm = thrust_sp_xy.norm();
 	const float thrust_max_squared = math::sq(_lim_thr_max);
 
-	// Determine how much vertical thrust is left keeping horizontal margin
-	const float allocated_horizontal_thrust = math::min(thrust_sp_xy_norm, _lim_thr_xy_margin);
-	const float thrust_z_max_squared = thrust_max_squared - math::sq(allocated_horizontal_thrust);
+	const float allocated_horizontal_thrust =
+		math::min(thrust_sp_xy_norm, _lim_thr_xy_margin);
 
-	// Saturate maximal vertical thrust
+	const float thrust_z_max_squared =
+		thrust_max_squared - math::sq(allocated_horizontal_thrust);
+
 	_thr_sp(2) = math::max(_thr_sp(2), -sqrtf(thrust_z_max_squared));
 
-	// Determine how much horizontal thrust is left after prioritizing vertical control
-	const float thrust_max_xy_squared = thrust_max_squared - math::sq(_thr_sp(2));
+	const float thrust_max_xy_squared =
+		thrust_max_squared - math::sq(_thr_sp(2));
+
 	float thrust_max_xy = 0.f;
 
 	if (thrust_max_xy_squared > 0.f) {
 		thrust_max_xy = sqrtf(thrust_max_xy_squared);
 	}
 
-	// Saturate thrust in horizontal direction
 	if (thrust_sp_xy_norm > thrust_max_xy) {
 		_thr_sp.xy() = thrust_sp_xy / thrust_sp_xy_norm * thrust_max_xy;
 	}
-
-	// Use tracking Anti-Windup for horizontal direction: during saturation, the integrator is used to unsaturate the output
-	// see Anti-Reset Windup for PID controllers, L.Rundqwist, 1990
-	const Vector2f acc_sp_xy_produced = Vector2f(_thr_sp) * (CONSTANTS_ONE_G / _hover_thrust);
-
-	// The produced acceleration can be greater or smaller than the desired acceleration due to the saturations and the actual vertical thrust (computed independently).
-	// The ARW loop needs to run if the signal is saturated only.
-	if (_acc_sp.xy().norm_squared() > acc_sp_xy_produced.norm_squared()) {
-		const float arw_gain = 2.f / _gain_vel_p(0);
-		const Vector2f acc_sp_xy = _acc_sp.xy();
-
-		vel_error.xy() = Vector2f(vel_error) - arw_gain * (acc_sp_xy - acc_sp_xy_produced);
-	}
-
-	// Make sure integral doesn't get NAN
-	ControlMath::setZeroIfNanVector3f(vel_error);
-	// Update integral part of velocity control
-	_vel_int += vel_error.emult(_gain_vel_i) * dt;
 }
 
-void PositionControl::_accelerationControl()
-{
-	// Assume standard acceleration due to gravity in vertical direction for attitude generation
-	float z_specific_force = -CONSTANTS_ONE_G;
-
-	if (!_decouple_horizontal_and_vertical_acceleration) {
-		// Include vertical acceleration setpoint for better horizontal acceleration tracking
-		z_specific_force += _acc_sp(2);
-	}
-
-	Vector3f body_z = Vector3f(-_acc_sp(0), -_acc_sp(1), -z_specific_force).normalized();
-	ControlMath::limitTilt(body_z, Vector3f(0, 0, 1), _lim_tilt);
-	// Convert to thrust assuming hover thrust produces standard gravity
-	const float thrust_ned_z = _acc_sp(2) * (_hover_thrust / CONSTANTS_ONE_G) - _hover_thrust;
-	// Project thrust to planned body attitude
-	const float cos_ned_body = (Vector3f(0, 0, 1).dot(body_z));
-	const float collective_thrust = math::min(thrust_ned_z / cos_ned_body, -_lim_thr_min);
-	_thr_sp = body_z * collective_thrust;
-}
 
 bool PositionControl::_inputValid()
 {
@@ -265,6 +313,112 @@ void PositionControl::getLocalPositionSetpoint(vehicle_local_position_setpoint_s
 
 void PositionControl::getAttitudeSetpoint(vehicle_attitude_setpoint_s &attitude_setpoint) const
 {
-	ControlMath::thrustToAttitude(_thr_sp, _yaw_sp, attitude_setpoint);
+	/*
+	 * Geometric desired attitude construction:
+	 *
+	 * b3_d = desired body z-axis
+	 * b1_c = desired yaw direction
+	 *
+	 * b2_d = (b3_d x b1_c) / ||b3_d x b1_c||
+	 * b1_d = b2_d x b3_d
+	 *
+	 * R_d = [b1_d b2_d b3_d]
+	 */
+
+	const Vector3f e3(0.f, 0.f, 1.f);
+
+	/*
+	 * PX4 thrust convention:
+	 *
+	 * _thr_sp points opposite to the desired body z-axis.
+	 *
+	 * Therefore:
+	 *
+	 * b3_d = -_thr_sp / ||_thr_sp||
+	 */
+
+	Vector3f b3_d = -_thr_sp;
+
+	if (b3_d.norm_squared() < 1e-6f) {
+		b3_d = e3;
+
+	} else {
+		b3_d.normalize();
+	}
+
+	const float yaw_d = PX4_ISFINITE(_yaw_sp) ? _yaw_sp : 0.f;
+
+	/*
+	 * Desired heading direction from yaw:
+	 *
+	 * b1_c = [cos(yaw_d), sin(yaw_d), 0]^T
+	 */
+
+	const Vector3f b1_c(cosf(yaw_d), sinf(yaw_d), 0.f);
+
+	/*
+	 * Construct orthonormal desired attitude frame
+	 */
+
+	Vector3f b2_d = b3_d.cross(b1_c);
+
+	if (b2_d.norm_squared() < 1e-6f) {
+		// fallback if b3_d and b1_c are almost parallel
+		b2_d = Vector3f(-sinf(yaw_d), cosf(yaw_d), 0.f);
+
+	} else {
+		b2_d.normalize();
+	}
+
+	Vector3f b1_d = b2_d.cross(b3_d);
+	b1_d.normalize();
+
+	/*
+	 * Desired rotation matrix:
+	 *
+	 * R_d = [b1_d b2_d b3_d]
+	 */
+
+	Dcmf R_d;
+
+	R_d(0, 0) = b1_d(0);
+	R_d(1, 0) = b1_d(1);
+	R_d(2, 0) = b1_d(2);
+
+	R_d(0, 1) = b2_d(0);
+	R_d(1, 1) = b2_d(1);
+	R_d(2, 1) = b2_d(2);
+
+	R_d(0, 2) = b3_d(0);
+	R_d(1, 2) = b3_d(1);
+	R_d(2, 2) = b3_d(2);
+
+	/*
+	 * Convert R_d to quaternion q_d
+	 */
+
+	const Quatf q_d(R_d);
+	q_d.copyTo(attitude_setpoint.q_d);
+
+	/*
+	 * Fill roll, pitch, yaw fields for logging/compatibility
+	 */
+
+	const Eulerf euler_sp(q_d);
+
+	attitude_setpoint.roll_body = euler_sp(0);
+	attitude_setpoint.pitch_body = euler_sp(1);
+	attitude_setpoint.yaw_body = euler_sp(2);
+
+	/*
+	 * PX4 thrust in body frame.
+	 *
+	 * For multicopters, thrust is along negative body z.
+	 */
+
+	attitude_setpoint.thrust_body[0] = 0.f;
+	attitude_setpoint.thrust_body[1] = 0.f;
+	attitude_setpoint.thrust_body[2] = -_thr_sp.norm();
+
 	attitude_setpoint.yaw_sp_move_rate = _yawspeed_sp;
 }
