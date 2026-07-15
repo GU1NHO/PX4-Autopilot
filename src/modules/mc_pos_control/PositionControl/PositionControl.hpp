@@ -34,7 +34,8 @@
 /**
  * @file PositionControl.hpp
  *
- * A cascaded position controller for position/velocity control only.
+ * Geometric SE(3) translational controller (Lee, Leok, McClamroch 2010,
+ * "Geometric Tracking Control of a Quadrotor UAV on SE(3)", eqs. 12 and 15).
  */
 
 #pragma once
@@ -50,27 +51,28 @@ struct PositionControlStates {
 	matrix::Vector3f velocity;
 	matrix::Vector3f acceleration;
 	float yaw;
+	matrix::Quatf attitude; ///< vehicle attitude, used to project thrust onto the measured body z axis (eq. 15)
 };
 
 /**
  * 	Core Position-Control for MC.
- * 	This class contains P-controller for position and
- * 	PID-controller for velocity.
+ * 	Geometric SE(3) translational tracking controller (Lee2010):
+ * 	pure PD feedback in acceleration space, desired body z axis from the
+ * 	total specific force direction (eq. 12) and collective thrust from its
+ * 	projection onto the measured body z axis (eq. 15).
  * 	Inputs:
- * 		vehicle position/velocity/yaw
- * 		desired set-point position/velocity/thrust/yaw/yaw-speed
+ * 		vehicle position/velocity/yaw/attitude
+ * 		desired set-point position/velocity/acceleration/yaw/yaw-speed
  * 		constraints that are stricter than global limits
  * 	Output
  * 		thrust vector and a yaw-setpoint
  *
  * 	If there is a position and a velocity set-point present, then
  * 	the velocity set-point is used as feed-forward. If feed-forward is
- * 	active, then the velocity component of the P-controller output has
+ * 	active, then the velocity component of the position feedback output has
  * 	priority over the feed-forward component.
  *
  * 	A setpoint that is NAN is considered as not set.
- * 	If there is a position/velocity- and thrust-setpoint present, then
- *  the thrust-setpoint is ommitted and recomputed from position-velocity-PID-loop.
  */
 class PositionControl
 {
@@ -79,19 +81,21 @@ public:
 	PositionControl() = default;
 	~PositionControl() = default;
 
-	/**
-	 * Set the position control gains
-	 * @param P 3D vector of proportional gains for x,y,z axis
-	 */
-	void setPositionGains(const matrix::Vector3f &P) { _gain_pos_p = P; }
+	// SE(3) geometric controller gains (Lee2010, mass-normalized: kx [1/s^2], kv [1/s]).
+	// Hardcoded tuning knobs for now (no PX4 params yet). Defaults are the PX4 cascade
+	// equivalents (kx = MPC_*_P * MPC_*_VEL_P_ACC, kv = MPC_*_VEL_P_ACC);
+	// the paper uses kx = 16, kv = 5.6 (much more aggressive).
+	static constexpr float SE3_KX_XY = 1.7f;
+	static constexpr float SE3_KX_Z = 4.0f;
+	static constexpr float SE3_KV_XY = 1.8f;
+	static constexpr float SE3_KV_Z = 4.0f;
 
 	/**
-	 * Set the velocity control gains
-	 * @param P 3D vector of proportional gains for x,y,z axis
-	 * @param I 3D vector of integral gains
-	 * @param D 3D vector of derivative gains
+	 * Set the SE(3) controller gains, overriding the hardcoded defaults
+	 * @param kx 3D vector of position error gains [1/s^2] (Lee2010 kx/m)
+	 * @param kv 3D vector of velocity error gains [1/s] (Lee2010 kv/m)
 	 */
-	void setVelocityGains(const matrix::Vector3f &P, const matrix::Vector3f &I, const matrix::Vector3f &D);
+	void setSE3Gains(const matrix::Vector3f &kx, const matrix::Vector3f &kv);
 
 	/**
 	 * Set the maximum velocity to execute with feed forward and position control
@@ -127,11 +131,11 @@ public:
 	void setHoverThrust(const float hover_thrust) { _hover_thrust = math::constrain(hover_thrust, HOVER_THRUST_MIN, HOVER_THRUST_MAX); }
 
 	/**
-	 * Update the hover thrust without immediately affecting the output
-	 * by adjusting the integrator. This prevents propagating the dynamics
-	 * of the hover thrust signal directly to the output of the controller.
+	 * Update the hover thrust from the hover thrust estimator.
+	 * With the pure PD law there is no integrator to absorb the change,
+	 * so the update flows to the output directly (the estimate is slow/filtered).
 	 */
-	void updateHoverThrust(const float hover_thrust_new);
+	void updateHoverThrust(const float hover_thrust_new) { setHoverThrust(hover_thrust_new); }
 
 	/**
 	 * Pass the current vehicle state to the controller
@@ -147,22 +151,15 @@ public:
 	void setInputSetpoint(const trajectory_setpoint_s &setpoint);
 
 	/**
-	 * Apply P-position and PID-velocity controller that updates the member
+	 * Apply the SE(3) translational controller that updates the member
 	 * thrust, yaw- and yawspeed-setpoints.
 	 * @see _thr_sp
 	 * @see _yaw_sp
 	 * @see _yawspeed_sp
-	 * @param dt time in seconds since last iteration
+	 * @param dt time in seconds since last iteration (unused, kept for interface compatibility)
 	 * @return true if update succeeded and output setpoint is executable, false if not
 	 */
 	bool update(const float dt);
-
-	/**
-	 * Set the integral term in xy to 0.
-	 * @see _vel_int
-	 */
-	void resetIntegral() { _vel_int.setZero(); }
-	void resetIntegralXY() { _vel_int.xy() = matrix::Vector2f(); }
 
 	/**
 	 * If set, the tilt setpoint is computed by assuming no vertical acceleration
@@ -197,15 +194,12 @@ private:
 
 	bool _inputValid();
 
-	void _positionControl(); ///< Position proportional control
-	void _velocityControl(const float dt); ///< Velocity PID control
-	void _accelerationControl(); ///< Acceleration setpoint processing
+	void _se3TranslationalControl(); ///< SE(3) geometric translational control (Lee2010 eqs. 12, 15)
 
 	// Gains
-	matrix::Vector3f _gain_pos_p; ///< Position control proportional gain
-	matrix::Vector3f _gain_vel_p; ///< Velocity control proportional gain
-	matrix::Vector3f _gain_vel_i; ///< Velocity control integral gain
-	matrix::Vector3f _gain_vel_d; ///< Velocity control derivative gain
+	matrix::Vector3f _gain_kx{SE3_KX_XY, SE3_KX_XY, SE3_KX_Z}; ///< Position error gain [1/s^2]
+	matrix::Vector3f _gain_kv{SE3_KV_XY, SE3_KV_XY, SE3_KV_Z}; ///< Velocity error gain [1/s]
+	matrix::Vector3f _gain_kx_over_kv{SE3_KX_XY / SE3_KV_XY, SE3_KX_XY / SE3_KV_XY, SE3_KX_Z / SE3_KV_Z}; ///< kx/kv, position error to implied velocity setpoint
 
 	// Limits
 	float _lim_vel_horizontal{}; ///< Horizontal velocity limit with feed forward and position control
@@ -223,7 +217,7 @@ private:
 	matrix::Vector3f _pos; /**< current position */
 	matrix::Vector3f _vel; /**< current velocity */
 	matrix::Vector3f _vel_dot; /**< velocity derivative (replacement for acceleration estimate) */
-	matrix::Vector3f _vel_int; /**< integral term of the velocity controller */
+	matrix::Vector3f _body_z{0.f, 0.f, 1.f}; /**< measured body z axis R*e3 in NED, used for the eq. 15 thrust projection */
 	float _yaw{}; /**< current heading */
 
 	// Setpoints

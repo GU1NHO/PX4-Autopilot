@@ -193,11 +193,7 @@ void MulticopterPositionControl::parameters_update(bool force)
 					    "Land tilt limit has been constrained by maximum tilt", _param_mpc_tiltmax_air.get());
 		}
 
-		_control.setPositionGains(Vector3f(_param_mpc_xy_p.get(), _param_mpc_xy_p.get(), _param_mpc_z_p.get()));
-		_control.setVelocityGains(
-			Vector3f(_param_mpc_xy_vel_p_acc.get(), _param_mpc_xy_vel_p_acc.get(), _param_mpc_z_vel_p_acc.get()),
-			Vector3f(_param_mpc_xy_vel_i_acc.get(), _param_mpc_xy_vel_i_acc.get(), _param_mpc_z_vel_i_acc.get()),
-			Vector3f(_param_mpc_xy_vel_d_acc.get(), _param_mpc_xy_vel_d_acc.get(), _param_mpc_z_vel_d_acc.get()));
+		// SE(3) controller gains are hardcoded in PositionControl.hpp (SE3_K*) for now
 		_control.setHorizontalThrustMargin(_param_mpc_thr_xy_marg.get());
 		_control.decoupleHorizontalAndVecticalAcceleration(_param_mpc_acc_decouple.get());
 		_goto_control.setParamMpcAccHor(_param_mpc_acc_hor.get());
@@ -303,7 +299,7 @@ void MulticopterPositionControl::parameters_update(bool force)
 
 		_takeoff.setSpoolupTime(_param_com_spoolup_time.get());
 		_takeoff.setTakeoffRampTime(_param_mpc_tko_ramp_t.get());
-		_takeoff.generateInitialRampValue(_param_mpc_z_vel_p_acc.get());
+		_takeoff.generateInitialRampValue(PositionControl::SE3_KV_Z);
 	}
 }
 
@@ -371,6 +367,14 @@ PositionControlStates MulticopterPositionControl::set_vehicle_states(const vehic
 	}
 
 	states.yaw = vehicle_local_position.heading;
+
+	vehicle_attitude_s vehicle_attitude;
+
+	if (_vehicle_attitude_sub.update(&vehicle_attitude)) {
+		_vehicle_attitude_q = matrix::Quatf(vehicle_attitude.q);
+	}
+
+	states.attitude = _vehicle_attitude_q;
 
 	return states;
 }
@@ -514,9 +518,6 @@ void MulticopterPositionControl::Run()
 				_setpoint = PositionControl::empty_trajectory_setpoint;
 				_setpoint.timestamp = vehicle_local_position.timestamp_sample;
 				Vector3f(0.f, 0.f, 100.f).copyTo(_setpoint.acceleration); // High downwards acceleration to make sure there's no thrust
-
-				// prevent any integrator windup
-				_control.resetIntegral();
 			}
 
 			// limit tilt during takeoff ramupup
@@ -559,13 +560,6 @@ void MulticopterPositionControl::Run()
 				states.velocity(2) = vehicle_local_position.z_deriv * weighting + vehicle_local_position.vz * (1.f - weighting);
 			}
 
-			if ((!PX4_ISFINITE(_setpoint.velocity[0]) || !PX4_ISFINITE(_setpoint.velocity[1]))
-			    && (!PX4_ISFINITE(_setpoint.position[0]) || !PX4_ISFINITE(_setpoint.position[1]))) {
-				// Horizontal velocity is not controlled, reset the integrators to avoid
-				// over-corrections when starting again.
-				_control.resetIntegralXY();
-			}
-
 			_control.setState(states);
 
 			const hrt_abstime now = hrt_absolute_time();
@@ -598,8 +592,8 @@ void MulticopterPositionControl::Run()
 			}
 
 			// Publish internal position control setpoints
-			// on top of the input/feed-forward setpoints these containt the PID corrections
-			// This message is used by other modules (such as Landdetector) to determine vehicle intention.
+			// on top of the input/feed-forward setpoints these contain the controller corrections
+			// This message is used for logging and telemetry (POSITION_TARGET_LOCAL_NED).
 			vehicle_local_position_setpoint_s local_pos_sp{};
 			_control.getLocalPositionSetpoint(local_pos_sp);
 			local_pos_sp.timestamp = hrt_absolute_time();
@@ -615,7 +609,6 @@ void MulticopterPositionControl::Run()
 			// an update is necessary here because otherwise the takeoff state doesn't get skipped with non-altitude-controlled modes
 			_takeoff.updateTakeoffState(_vehicle_control_mode.flag_armed, _vehicle_land_detected.landed, false, 10.f, true,
 						    vehicle_local_position.timestamp_sample);
-			_control.resetIntegral();
 		}
 
 		// Publish takeoff status
@@ -774,9 +767,11 @@ int MulticopterPositionControl::print_usage(const char *reason)
 	PRINT_MODULE_DESCRIPTION(
 		R"DESCR_STR(
 ### Description
-The controller has two loops: a P loop for position error and a PID loop for velocity error.
-Output of the velocity controller is thrust vector that is split to thrust direction
-(i.e. rotation matrix for multicopter orientation) and thrust scalar (i.e. multicopter thrust itself).
+Geometric SE(3) translational controller (Lee, Leok, McClamroch 2010): pure PD feedback on position
+and velocity errors in acceleration space. The desired body z axis is the direction of the total
+specific force (eq. 12) and the collective thrust is its projection onto the measured body z axis
+(eq. 15), split into thrust direction (i.e. rotation matrix for multicopter orientation) and thrust
+scalar (i.e. multicopter thrust itself).
 
 The controller doesn't use Euler angles for its work, they are generated only for more human-friendly control and
 logging.

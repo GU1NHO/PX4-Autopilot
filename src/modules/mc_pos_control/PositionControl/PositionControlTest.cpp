@@ -34,6 +34,7 @@
 #include <gtest/gtest.h>
 #include <PositionControl.hpp>
 #include <px4_defines.h>
+#include <geo/geo.h>
 
 using namespace matrix;
 
@@ -70,8 +71,8 @@ class PositionControlBasicTest : public ::testing::Test
 public:
 	PositionControlBasicTest()
 	{
-		_position_control.setPositionGains(Vector3f(1.f, 1.f, 1.f));
-		_position_control.setVelocityGains(Vector3f(20.f, 20.f, 20.f), Vector3f(20.f, 20.f, 20.f), Vector3f(20.f, 20.f, 20.f));
+		// kx/kv = 1 preserves the position error to velocity setpoint ratio of the old cascade tests
+		_position_control.setSE3Gains(Vector3f(20.f, 20.f, 20.f), Vector3f(20.f, 20.f, 20.f));
 		_position_control.setVelocityLimits(1.f, 1.f, 1.f);
 		_position_control.setThrustLimits(0.1f, MAXIMUM_THRUST);
 		_position_control.setHorizontalThrustMargin(HORIZONTAL_THRUST_MARGIN);
@@ -160,7 +161,7 @@ TEST_F(PositionControlBasicTest, VelocityLimit)
 
 TEST_F(PositionControlBasicTest, PositionControlMaxThrustLimit)
 {
-	// Given a setpoint that drives the controller into vertical and horizontal saturation
+	// Given a setpoint that drives the controller into saturation
 	Vector3f(10.f, 10.f, -10.f).copyTo(_input_setpoint.position);
 
 	// When you run it for one iteration
@@ -170,23 +171,25 @@ TEST_F(PositionControlBasicTest, PositionControlMaxThrustLimit)
 	// Then the thrust vector length is limited by the maximum
 	EXPECT_FLOAT_EQ(thrust.norm(), MAXIMUM_THRUST);
 
-	// Then the horizontal thrust is limited by its margin
-	EXPECT_FLOAT_EQ(thrust(0), HORIZONTAL_THRUST_MARGIN / sqrt(2.f));
-	EXPECT_FLOAT_EQ(thrust(1), HORIZONTAL_THRUST_MARGIN / sqrt(2.f));
-	EXPECT_FLOAT_EQ(thrust(2),
-			-sqrt(MAXIMUM_THRUST * MAXIMUM_THRUST - HORIZONTAL_THRUST_MARGIN * HORIZONTAL_THRUST_MARGIN));
-	thrust.print();
+	// Then the vertical thrust is prioritized: velocity setpoints saturate at (1/sqrt(2), 1/sqrt(2), -1),
+	// the projected collective thrust is hover_thrust * |acc_z - g| / g with the direction tilt-limited to 1 rad
+	const float collective_thrust = .5f * (20.f + CONSTANTS_ONE_G) / CONSTANTS_ONE_G;
+	const float thrust_z_expected = -cosf(1.f) * collective_thrust;
+	EXPECT_FLOAT_EQ(thrust(2), thrust_z_expected);
+
+	// and the horizontal thrust takes what is left up to the maximum
+	const float thrust_xy_expected = sqrtf(MAXIMUM_THRUST * MAXIMUM_THRUST - thrust_z_expected * thrust_z_expected);
+	EXPECT_FLOAT_EQ(thrust(0), thrust_xy_expected / sqrtf(2.f));
+	EXPECT_FLOAT_EQ(thrust(1), thrust_xy_expected / sqrtf(2.f));
 
 	// Then the collective thrust is limited by the maximum
 	EXPECT_EQ(_attitude.thrust_body[0], 0.f);
 	EXPECT_EQ(_attitude.thrust_body[1], 0.f);
 	EXPECT_FLOAT_EQ(_attitude.thrust_body[2], -MAXIMUM_THRUST);
 
-	// Then the horizontal margin results in a tilt with the ratio of: horizontal margin / maximum thrust
+	// Then the tilt corresponds to the saturated thrust vector direction
 	Eulerf euler_att(Quatf(_attitude.q_d));
-	EXPECT_FLOAT_EQ(euler_att.phi(), asin((HORIZONTAL_THRUST_MARGIN / sqrt(2.f)) / MAXIMUM_THRUST));
-	// TODO: add this line back once attitude setpoint generation strategy does not align body yaw with heading all the time anymore
-	// EXPECT_FLOAT_EQ(_attitude.pitch_body, -asin((HORIZONTAL_THRUST_MARGIN / sqrt(2.f)) / MAXIMUM_THRUST));
+	EXPECT_FLOAT_EQ(euler_att.phi(), asin((thrust_xy_expected / sqrtf(2.f)) / MAXIMUM_THRUST));
 }
 
 TEST_F(PositionControlBasicTest, PositionControlMinThrustLimit)
@@ -340,11 +343,11 @@ TEST_F(PositionControlBasicTest, PositionSetpointInvalidState)
 	_position_control.setState(states);
 	EXPECT_FALSE(runController());
 
-	// Velocity derivative invalid
+	// Velocity derivative invalid - ok, not used by the SE(3) law
 	states.velocity(0) = 0.f;
 	states.acceleration(1) = NAN;
 	_position_control.setState(states);
-	EXPECT_FALSE(runController());
+	EXPECT_TRUE(runController());
 }
 
 TEST_F(PositionControlBasicTest, VelocitySetpointInvalidState)
@@ -371,11 +374,11 @@ TEST_F(PositionControlBasicTest, VelocitySetpointInvalidState)
 	_position_control.setState(states);
 	EXPECT_FALSE(runController());
 
-	// Velocity derivative invalid
+	// Velocity derivative invalid - ok, not used by the SE(3) law
 	states.velocity(0) = 0.f;
 	states.acceleration(1) = NAN;
 	_position_control.setState(states);
-	EXPECT_FALSE(runController());
+	EXPECT_TRUE(runController());
 }
 
 
@@ -398,9 +401,9 @@ TEST_F(PositionControlBasicTest, UpdateHoverThrust)
 	_position_control.updateHoverThrust(hover_thrust_new);
 	EXPECT_TRUE(runController());
 
-	// THEN: the integral is updated to avoid discontinuities and
-	// the output is still the same
-	EXPECT_EQ(_output_setpoint.thrust[2], -hover_thrust);
+	// THEN: with the pure PD law there is no integrator to absorb the change,
+	// the update flows to the output directly
+	EXPECT_EQ(_output_setpoint.thrust[2], -hover_thrust_new);
 }
 
 TEST_F(PositionControlBasicTest, IntegratorWindupWithInvalidSetpoint)
