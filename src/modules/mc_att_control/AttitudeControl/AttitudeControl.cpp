@@ -41,66 +41,65 @@
 
 using namespace matrix;
 
-void AttitudeControl::setProportionalGain(const matrix::Vector3f &proportional_gain, const float yaw_weight)
-{
-	_proportional_gain = proportional_gain;
-	_yaw_w = math::constrain(yaw_weight, 0.f, 1.f);
-
-	// compensate for the effect of the yaw weight rescaling the output
-	if (_yaw_w > 1e-4f) {
-		_proportional_gain(2) /= _yaw_w;
-	}
-}
-
 matrix::Vector3f AttitudeControl::update(const Quatf &q) const
 {
-	Quatf qd = _attitude_setpoint_q;
+	const Dcmf R(q);
+	const Dcmf Rd(_attitude_setpoint_q);
 
-	// calculate reduced desired attitude neglecting vehicle's yaw to prioritize roll and pitch
-	const Vector3f e_z = q.dcm_z();
-	const Vector3f e_z_d = qd.dcm_z();
-	Quatf qd_red(e_z, e_z_d);
+	// Geometric attitude tracking error eR = 1/2 * (Rd^T R - R^T Rd)∨ (Lee2010 eq. 10), body frame
+	const Matrix3f R_err = Rd.transpose() * R;
+	Vector3f eR(0.5f * (R_err(2, 1) - R_err(1, 2)),
+		    0.5f * (R_err(0, 2) - R_err(2, 0)),
+		    0.5f * (R_err(1, 0) - R_err(0, 1)));
 
-	if (fabsf(qd_red(1)) > (1.f - 1e-5f) || fabsf(qd_red(2)) > (1.f - 1e-5f)) {
-		// In the infinitesimal corner case where the vehicle and thrust have the completely opposite direction,
-		// full attitude control anyways generates no yaw input and directly takes the combination of
-		// roll and pitch leading to the correct desired yaw. Ignoring this case would still be totally safe and stable.
-		qd_red = qd;
+	// Escape the 180 degree critical point where eR vanishes (tr(Rd^T R) -> -1, error function Ψ -> 2).
+	// There the error rotation axis a satisfies R_err * a = a and (R_err + I) = 2*a*a^T:
+	// recover a from the largest column and command a full-scale error along it (max of the sin(α) profile).
+	const float trace_R_err = R_err(0, 0) + R_err(1, 1) + R_err(2, 2);
 
-	} else {
-		// Transform rotation from current to desired thrust vector into a world frame reduced desired attitude.
-		// This is a right multiplication as the tilt error quaternion is obtained from two Z vectors expressed in the world frame.
-		qd_red *= q;
+	if ((trace_R_err < -1.f + 1e-2f) && (eR.norm_squared() < 1e-4f)) {
+		Matrix3f A = R_err;
+		A(0, 0) += 1.f;
+		A(1, 1) += 1.f;
+		A(2, 2) += 1.f;
+
+		Vector3f axis;
+		float max_norm_squared = 0.f;
+
+		for (int i = 0; i < 3; i++) {
+			const Vector3f column(A(0, i), A(1, i), A(2, i));
+
+			if (column.norm_squared() > max_norm_squared) {
+				max_norm_squared = column.norm_squared();
+				axis = column;
+			}
+		}
+
+		axis = axis.unit_or_zero();
+
+		// deterministic sign: first non-zero component positive
+		for (int i = 0; i < 3; i++) {
+			if (fabsf(axis(i)) > 1e-6f) {
+				if (axis(i) < 0.f) {
+					axis = -axis;
+				}
+
+				break;
+			}
+		}
+
+		eR = axis;
 	}
 
-	// With a full desired attitude given by: qd = qd_red * qd_dyaw, extract the delta yaw component.
-	// By definition, the delta yaw quaternion has the form (cos(angle/2), 0, 0, sin(angle/2))
-	Quatf qd_dyaw = qd_red.inversed() * qd;
-	qd_dyaw.canonicalize();
-	// catch numerical problems with the domain of acosf and asinf
-	qd_dyaw(0) = math::constrain(qd_dyaw(0), -1.f, 1.f);
-	qd_dyaw(3) = math::constrain(qd_dyaw(3), -1.f, 1.f);
-
-	// scale the delta yaw angle and re-combine the desired attitude
-	qd = qd_red * Quatf(cosf(_yaw_w * acosf(qd_dyaw(0))), 0.f, 0.f, sinf(_yaw_w * asinf(qd_dyaw(3))));
-
-	// quaternion attitude control law, qe is rotation from q to qd
-	const Quatf qe = q.inversed() * qd;
-
-	// using sin(alpha/2) scaled rotation axis as attitude error (see quaternion definition by axis angle)
-	// also taking care of the antipodal unit quaternion ambiguity
-	const Vector3f eq = 2.f * qe.canonical().imag();
-
 	// calculate angular rates setpoint
-	Vector3f rate_setpoint = eq.emult(_proportional_gain);
+	Vector3f rate_setpoint = -eR.emult(_gain_kr);
 
 	// Feed forward the yaw setpoint rate.
 	// yawspeed_setpoint is the feed forward commanded rotation around the world z-axis,
 	// but we need to apply it in the body frame (because _rates_sp is expressed in the body frame).
 	// Therefore we infer the world z-axis (expressed in the body frame) by taking the last column of R.transposed (== q.inversed)
 	// and multiply it by the yaw setpoint rate (yawspeed_setpoint).
-	// This yields a vector representing the commanded rotatation around the world z-axis expressed in the body frame
-	// such that it can be added to the rates setpoint.
+	// This equals the transformed desired rate R^T Rd Ωd of Lee2010 eq. 11 for Ωd = yawspeed * Rd^T e3.
 	if (std::isfinite(_yawspeed_setpoint)) {
 		rate_setpoint += q.inversed().dcm_z() * _yawspeed_setpoint;
 	}

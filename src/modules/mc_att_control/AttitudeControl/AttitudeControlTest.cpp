@@ -49,30 +49,30 @@ class AttitudeControlConvergenceTest : public ::testing::Test
 public:
 	AttitudeControlConvergenceTest()
 	{
-		_attitude_control.setProportionalGain(Vector3f(.5f, .6f, .3f), .4f);
+		_attitude_control.setSE3AttitudeGains(Vector3f(.5f, .6f, .3f));
 		_attitude_control.setRateLimit(Vector3f(100.f, 100.f, 100.f));
 	}
 
 	void checkConvergence()
 	{
 		int i; // need function scope to check how many steps
-		Vector3f rate_setpoint(1000.f, 1000.f, 1000.f);
 
 		_attitude_control.setAttitudeSetpoint(_quat_goal, 0.f);
 
+		// Note: the geometric error norm sin(α) legitimately grows while the error angle α
+		// shrinks from near 180 towards 90 degrees, so unlike the previous quaternion law
+		// the output norm is not monotonic; convergence is checked on the attitude directly.
 		for (i = 100; i > 0; i--) {
 			// run attitude control to get rate setpoints
-			const Vector3f rate_setpoint_new = _attitude_control.update(_quat_state);
+			const Vector3f rate_setpoint = _attitude_control.update(_quat_state);
+			EXPECT_TRUE(rate_setpoint.isAllFinite());
 			// rotate the simulated state quaternion according to the rate setpoint
-			_quat_state = _quat_state * Quatf(AxisAnglef(rate_setpoint_new));
-			_quat_state = -_quat_state; // produce intermittent antipodal quaternion states to test against unwinding problem
+			_quat_state = _quat_state * Quatf(AxisAnglef(rate_setpoint));
+			_quat_state = -_quat_state; // antipodal flips represent the same rotation, the matrix based law is immune
 
-			// expect the error and hence also the output to get smaller with each iteration
-			if (rate_setpoint_new.norm() >= rate_setpoint.norm()) {
+			if (_quat_state.canonical() == _quat_goal.canonical()) {
 				break;
 			}
-
-			rate_setpoint = rate_setpoint_new;
 		}
 
 		EXPECT_EQ(_quat_state.canonical(), _quat_goal.canonical());
@@ -112,29 +112,58 @@ TEST_F(AttitudeControlConvergenceTest, AttitudeControlConvergence)
 	}
 }
 
-TEST(AttitudeControlTest, YawWeightScaling)
+TEST(AttitudeControlTest, YawGain)
 {
-	// GIVEN: default tuning and pure yaw turn command
+	// GIVEN: a pure yaw turn command
 	AttitudeControl attitude_control;
 	const float yaw_gain = 2.8f;
 	const float yaw_sp = .1f;
 	Quatf pure_yaw_attitude(cosf(yaw_sp / 2.f), 0, 0, sinf(yaw_sp / 2.f));
-	attitude_control.setProportionalGain(Vector3f(6.5f, 6.5f, yaw_gain), .4f);
+	attitude_control.setSE3AttitudeGains(Vector3f(6.5f, 6.5f, yaw_gain));
 	attitude_control.setRateLimit(Vector3f(1000.f, 1000.f, 1000.f));
 	attitude_control.setAttitudeSetpoint(pure_yaw_attitude, 0.f);
 
 	// WHEN: we run one iteration of the controller
-	Vector3f rate_setpoint = attitude_control.update(Quatf());
+	const Vector3f rate_setpoint = attitude_control.update(Quatf());
 
 	// THEN: no actuation in roll, pitch
 	EXPECT_EQ(Vector2f(rate_setpoint), Vector2f());
-	// THEN: actuation error * gain in yaw
-	EXPECT_NEAR(rate_setpoint(2), yaw_sp * yaw_gain, 1e-4f);
+	// THEN: yaw actuation sin(error) * gain towards the setpoint (eq. 10 error profile)
+	EXPECT_NEAR(rate_setpoint(2), sinf(yaw_sp) * yaw_gain, 1e-4f);
+}
 
-	// GIVEN: additional corner case of zero yaw weight
-	attitude_control.setProportionalGain(Vector3f(6.5f, 6.5f, yaw_gain), 0.f);
+TEST(AttitudeControlTest, GeometricErrorSmallAngle)
+{
+	// GIVEN: the vehicle rolled ahead of a level attitude setpoint
+	AttitudeControl attitude_control;
+	attitude_control.setSE3AttitudeGains(Vector3f(4.f, 4.f, 2.8f));
+	attitude_control.setRateLimit(Vector3f(1000.f, 1000.f, 1000.f));
+	attitude_control.setAttitudeSetpoint(Quatf(), 0.f);
+	const float roll_error = .2f;
+	const Quatf q_state(Eulerf(roll_error, 0.f, 0.f));
+
 	// WHEN: we run one iteration of the controller
-	rate_setpoint = attitude_control.update(Quatf());
-	// THEN: no actuation (also no NAN)
-	EXPECT_EQ(rate_setpoint, Vector3f());
+	const Vector3f rate_setpoint = attitude_control.update(q_state);
+
+	// THEN: eR = sin(error) about body x, rate setpoint = -kR * eR (eq. 10 sign and magnitude)
+	EXPECT_NEAR(rate_setpoint(0), -4.f * sinf(roll_error), 1e-4f);
+	EXPECT_NEAR(rate_setpoint(1), 0.f, 1e-4f);
+	EXPECT_NEAR(rate_setpoint(2), 0.f, 1e-4f);
+}
+
+TEST(AttitudeControlTest, CriticalPointEscape)
+{
+	// GIVEN: a 180 degree yaw error, where the eq. 10 error eR vanishes (critical point of Ψ)
+	AttitudeControl attitude_control;
+	attitude_control.setSE3AttitudeGains(Vector3f(4.f, 4.f, 2.8f));
+	attitude_control.setRateLimit(Vector3f(1000.f, 1000.f, 1000.f));
+	attitude_control.setAttitudeSetpoint(Quatf(0.f, 0.f, 0.f, 1.f), 0.f);
+
+	// WHEN: we run one iteration of the controller
+	const Vector3f rate_setpoint = attitude_control.update(Quatf());
+
+	// THEN: the escape commands a finite, full-scale rotation about the error axis instead of stalling
+	EXPECT_TRUE(rate_setpoint.isAllFinite());
+	EXPECT_GT(rate_setpoint.norm(), 1.f);
+	EXPECT_NEAR(fabsf(rate_setpoint(2)), 2.8f, 1e-4f);
 }

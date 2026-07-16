@@ -88,9 +88,7 @@ MulticopterAttitudeControl::init()
 void
 MulticopterAttitudeControl::parameters_updated()
 {
-	// Store some of the parameters in a more convenient way & precompute often-used values
-	_attitude_control.setProportionalGain(Vector3f(_param_mc_roll_p.get(), _param_mc_pitch_p.get(), _param_mc_yaw_p.get()),
-					      _param_mc_yaw_weight.get());
+	// SE(3) attitude gains are hardcoded in AttitudeControl.hpp (SE3_KR_*) for now
 
 	// angular rate limits
 	using math::radians;

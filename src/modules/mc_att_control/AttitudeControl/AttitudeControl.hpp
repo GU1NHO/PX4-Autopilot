@@ -34,16 +34,13 @@
 /**
  * @file AttitudeControl.hpp
  *
- * A quaternion based attitude controller.
+ * Geometric SO(3) attitude tracking controller, cascade form.
  *
- * @author Matthias Grob	<maetugr@gmail.com>
- *
- * Publication documenting the implemented Quaternion Attitude Control:
- * Nonlinear Quadrocopter Attitude Control (2013)
- * by Dario Brescianini, Markus Hehn and Raffaello D'Andrea
- * Institute for Dynamic Systems and Control (IDSC), ETH Zurich
- *
- * https://www.research-collection.ethz.ch/bitstream/handle/20.500.11850/154099/eth-7387-01.pdf
+ * Implements the attitude error of Lee, Leok, McClamroch 2010,
+ * "Geometric Tracking Control of a Quadrotor UAV on SE(3)" (eqs. 8, 10):
+ * eR = 1/2 (Rd^T R - R^T Rd)∨, output rate setpoint = -kR ∘ eR + feedforward.
+ * The angular velocity error (eq. 11) and moment law (eq. 16) belong to the
+ * rate loop (Phase 3).
  */
 
 #pragma once
@@ -57,12 +54,19 @@ public:
 	AttitudeControl() = default;
 	~AttitudeControl() = default;
 
+	// SE(3) geometric attitude gains kR [1/s], tunable per axis (Lee2010 eq. 10, cascade form).
+	// Hardcoded tuning knobs for now (no PX4 params). Defaults are the stock PX4 equivalents
+	// (MC_ROLL_P, MC_PITCH_P, MC_YAW_P); the paper's moment-law gains kR = 8.81, kOmega = 2.54
+	// correspond to a cascade gain of kR/kOmega ≈ 3.5.
+	static constexpr float SE3_KR_X = 4.0f;
+	static constexpr float SE3_KR_Y = 4.0f;
+	static constexpr float SE3_KR_Z = 2.8f;
+
 	/**
-	 * Set proportional attitude control gain
-	 * @param proportional_gain 3D vector containing gains for roll, pitch, yaw
-	 * @param yaw_weight A fraction [0,1] deprioritizing yaw compared to roll and pitch
+	 * Set the SE(3) attitude gains, overriding the hardcoded defaults
+	 * @param kr 3D vector of attitude error gains [1/s] for the body x, y, z axes
 	 */
-	void setProportionalGain(const matrix::Vector3f &proportional_gain, const float yaw_weight);
+	void setSE3AttitudeGains(const matrix::Vector3f &kr) { _gain_kr = kr; }
 
 	/**
 	 * Set hard limit for output rate setpoints
@@ -101,9 +105,8 @@ public:
 	matrix::Vector3f update(const matrix::Quatf &q) const;
 
 private:
-	matrix::Vector3f _proportional_gain;
+	matrix::Vector3f _gain_kr{SE3_KR_X, SE3_KR_Y, SE3_KR_Z}; ///< attitude error gain [1/s]
 	matrix::Vector3f _rate_limit;
-	float _yaw_w{0.f}; ///< yaw weight [0,1] to deprioritize caompared to roll and pitch
 
 	matrix::Quatf _attitude_setpoint_q; ///< latest known attitude setpoint e.g. from position control
 	float _yawspeed_setpoint{0.f}; ///< latest known yawspeed feed-forward setpoint
