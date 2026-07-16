@@ -1,0 +1,18 @@
+# Waypoints in drone body frame at the moment Offboard mode is activated.
+# [forward_m, right_m, up_m]
+#   forward > 0  → ahead of drone      forward < 0  → behind
+#   right   > 0  → right of drone      right   < 0  → left
+#   up      > 0  → climb               up      = 0  → hold current altitude
+#
+# The script captures position and heading at Offboard activation and
+# rotates/translates these into absolute NED before executing.
+
+acceptance_radius: 0.5
+speed_ms: 0.4        # setpoint moves at this speed toward each waypoint (m/s)
+
+waypoints:
+  # Square path in front of the drone, at current altitude
+  - [3.0,  0.0,  0.0]   # 5m ahead
+  - [3.0,  3.0,  0.0]   # 5m ahead, 5m right
+  - [0.0,  3.0,  0.0]   # 5m right
+  - [0.0,  0.0,  0.0]   # return to start
