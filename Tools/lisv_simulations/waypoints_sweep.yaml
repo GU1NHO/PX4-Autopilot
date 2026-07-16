@@ -1,0 +1,16 @@
+# Waypoints for the controller speed-sweep test (see speed_sweep.py).
+# Same square path as waypoints_example.yaml, but with an explicit [0,0,0]
+# checkpoint at the start -- since the path already ends back at [0,0,0],
+# every trial in the sweep begins and ends at the exact same physical spot,
+# relative to the ONE origin captured at the start of the whole sweep.
+#
+# speed and acceptance_radius are NOT read from this file: speed_sweep.py
+# takes speeds via --speeds, and does not use acceptance_radius at all
+# (removed by design -- see speed_sweep.py docstring).
+
+waypoints:
+  - [0.0, 0.0, 0.0]   # checkpoint: confirm/settle at the trial's start position
+  - [3.0, 0.0, 0.0]   # 3m ahead
+  - [3.0, 3.0, 0.0]   # 3m ahead, 3m right
+  - [0.0, 3.0, 0.0]   # 3m right
+  - [0.0, 0.0, 0.0]   # return to start
