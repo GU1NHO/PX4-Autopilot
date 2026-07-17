@@ -85,12 +85,12 @@ public:
 	// tunable per axis. Hardcoded tuning knobs for now (no PX4 params yet).
 	// PX4 cascade equivalents: kx = MPC_*_P * MPC_*_VEL_P_ACC, kv = MPC_*_VEL_P_ACC
 	// (iris: kx 1.7/1.7/4.0, kv 1.8/1.8/4.0); the paper uses kx = 16, kv = 5.6.
-	static constexpr float SE3_KX_X = 1.7f;
-	static constexpr float SE3_KX_Y = 1.7f;
+	static constexpr float SE3_KX_X = 4.0f;
+	static constexpr float SE3_KX_Y = 4.0f;
 	static constexpr float SE3_KX_Z = 4.0f;
-	static constexpr float SE3_KV_X = 1.8f;
-	static constexpr float SE3_KV_Y = 1.8f;
-	static constexpr float SE3_KV_Z = 4.0f;
+	static constexpr float SE3_KV_X = 3.0f;
+	static constexpr float SE3_KV_Y = 3.0f;
+	static constexpr float SE3_KV_Z = 3.0f;
 
 
 	/**
