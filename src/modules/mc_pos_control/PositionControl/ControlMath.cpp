@@ -44,10 +44,30 @@ using namespace matrix;
 
 namespace ControlMath
 {
-void thrustToAttitude(const Vector3f &thr_sp, const float yaw_sp, vehicle_attitude_setpoint_s &att_sp)
+void thrustToAttitude(
+	const Vector3f &thr_sp,
+	const float yaw_sp,
+	vehicle_attitude_setpoint_s &att_sp)
 {
+	/*
+	 * PX4 normalized thrust points opposite to the desired body-z axis:
+	 *
+	 *     thr_sp = fz_normalized * b3_d
+	 *
+	 * where fz_normalized < 0.
+	 *
+	 * Therefore:
+	 *
+	 *     b3_d = -thr_sp / ||thr_sp||
+	 */
 	bodyzToAttitude(-thr_sp, yaw_sp, att_sp);
-	att_sp.thrust_body[2] = -thr_sp.length();
+
+	/*
+	 * PX4 collective thrust is applied along negative body z.
+	 */
+	att_sp.thrust_body[0] = 0.f;
+	att_sp.thrust_body[1] = 0.f;
+	att_sp.thrust_body[2] = -thr_sp.norm();
 }
 
 void limitTilt(Vector3f &body_unit, const Vector3f &world_unit, const float max_angle)
@@ -66,50 +86,107 @@ void limitTilt(Vector3f &body_unit, const Vector3f &world_unit, const float max_
 
 	body_unit = cosf(angle) * world_unit + sinf(angle) * rejection.unit();
 }
-
-void bodyzToAttitude(Vector3f body_z, const float yaw_sp, vehicle_attitude_setpoint_s &att_sp)
+void bodyzToAttitude(
+	Vector3f b3_d,
+	const float yaw_sp,
+	vehicle_attitude_setpoint_s &att_sp)
 {
-	// zero vector, no direction, set safe level value
-	if (body_z.norm_squared() < FLT_EPSILON) {
-		body_z(2) = 1.f;
+	const Vector3f e3(0.f, 0.f, 1.f);
+
+	/*
+	 * Safe fallback when the requested thrust direction is zero.
+	 */
+	if (b3_d.norm_squared() < FLT_EPSILON) {
+		b3_d = e3;
 	}
 
-	body_z.normalize();
+	b3_d.normalize();
 
-	// vector of desired yaw direction in XY plane, rotated by PI/2
-	const Vector3f y_C{-sinf(yaw_sp), cosf(yaw_sp), 0.f};
+	/*
+	 * Desired heading direction:
+	 *
+	 *     b1_c = [cos(yaw_d), sin(yaw_d), 0]^T
+	 */
+	const Vector3f b1_c(
+		cosf(yaw_sp),
+		sinf(yaw_sp),
+		0.f
+	);
 
-	// desired body_x axis, orthogonal to body_z
-	Vector3f body_x = y_C % body_z;
+	/*
+	 * Desired body-y axis:
+	 *
+	 *     b2_d = (b3_d x b1_c) / ||b3_d x b1_c||
+	 */
+	Vector3f b2_d = b3_d % b1_c;
 
-	// keep nose to front while inverted upside down
-	if (body_z(2) < 0.f) {
-		body_x = -body_x;
+	/*
+	 * Singularity:
+	 *
+	 * b3_d and b1_c can become parallel when the requested thrust
+	 * direction is horizontal and aligned with the desired heading.
+	 *
+	 * In that case, use the desired heading-normal direction:
+	 *
+	 *     b2_c = [-sin(yaw_d), cos(yaw_d), 0]^T
+	 */
+	if (b2_d.norm_squared() < 1e-6f) {
+		const Vector3f b2_c(
+			-sinf(yaw_sp),
+			 cosf(yaw_sp),
+			 0.f
+		);
+
+		/*
+		 * Construct an axis orthogonal to b3_d using b2_c.
+		 */
+		Vector3f b1_fallback = b2_c % b3_d;
+
+		if (b1_fallback.norm_squared() < 1e-6f) {
+			/*
+			 * Last-resort fallback for a numerically degenerate case.
+			 */
+			b1_fallback = Vector3f(1.f, 0.f, 0.f);
+		}
+
+		b1_fallback.normalize();
+
+		b2_d = b3_d % b1_fallback;
 	}
 
-	if (fabsf(body_z(2)) < 0.000001f) {
-		// desired thrust is in XY plane, set X downside to construct correct matrix,
-		// but yaw component will not be used actually
-		body_x.zero();
-		body_x(2) = 1.f;
-	}
+	b2_d.normalize();
 
-	body_x.normalize();
+	/*
+	 * Desired body-x axis:
+	 *
+	 *     b1_d = b2_d x b3_d
+	 */
+	Vector3f b1_d = b2_d % b3_d;
+	b1_d.normalize();
 
-	// desired body_y axis
-	const Vector3f body_y = body_z % body_x;
+	/*
+	 * Recompute b2_d to improve numerical orthogonality:
+	 *
+	 *     b2_d = b3_d x b1_d
+	 */
+	b2_d = b3_d % b1_d;
+	b2_d.normalize();
 
+	/*
+	 * Desired rotation matrix:
+	 *
+	 *     R_sp = [b1_d  b2_d  b3_d]
+	 */
 	Dcmf R_sp;
 
-	// fill rotation matrix
-	for (int i = 0; i < 3; i++) {
-		R_sp(i, 0) = body_x(i);
-		R_sp(i, 1) = body_y(i);
-		R_sp(i, 2) = body_z(i);
-	}
+	R_sp.setCol(0, b1_d);
+	R_sp.setCol(1, b2_d);
+	R_sp.setCol(2, b3_d);
 
-	// copy quaternion setpoint to attitude setpoint topic
-	const Quatf q_sp{R_sp};
+	/*
+	 * Convert R_sp to quaternion.
+	 */
+	const Quatf q_sp(R_sp);
 	q_sp.copyTo(att_sp.q_d);
 }
 

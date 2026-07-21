@@ -30,13 +30,13 @@
  * POSSIBILITY OF SUCH DAMAGE.
  *
  ****************************************************************************/
+
 /**
  * @file PositionControl.cpp
  */
 
 #include "PositionControl.hpp"
 #include "ControlMath.hpp"
-
 #include <float.h>
 #include <mathlib/mathlib.h>
 #include <px4_platform_common/defines.h>
@@ -44,30 +44,16 @@
 
 using namespace matrix;
 
-const trajectory_setpoint_s PositionControl::empty_trajectory_setpoint = {
-	0,
-	{NAN, NAN, NAN},
-	{NAN, NAN, NAN},
-	{NAN, NAN, NAN},
-	{NAN, NAN, NAN},
-	NAN,
-	NAN
-};
+const trajectory_setpoint_s PositionControl::empty_trajectory_setpoint = {0, {NAN, NAN, NAN}, {NAN, NAN, NAN}, {NAN, NAN, NAN}, {NAN, NAN, NAN}, NAN, NAN};
 
-void PositionControl::setVelocityGains(
-	const Vector3f &P,
-	const Vector3f &I,
-	const Vector3f &D)
+void PositionControl::setVelocityGains(const Vector3f &P, const Vector3f &I, const Vector3f &D)
 {
 	_gain_vel_p = P;
 	_gain_vel_i = I;
 	_gain_vel_d = D;
 }
 
-void PositionControl::setVelocityLimits(
-	const float vel_horizontal,
-	const float vel_up,
-	const float vel_down)
+void PositionControl::setVelocityLimits(const float vel_horizontal, const float vel_up, const float vel_down)
 {
 	_lim_vel_horizontal = vel_horizontal;
 	_lim_vel_up = vel_up;
@@ -76,8 +62,7 @@ void PositionControl::setVelocityLimits(
 
 void PositionControl::setThrustLimits(const float min, const float max)
 {
-	// Ensure that the thrust vector always has enough magnitude
-	// to define an attitude.
+	// make sure there's always enough thrust vector length to infer the attitude
 	_lim_thr_min = math::max(min, 10e-4f);
 	_lim_thr_max = max;
 }
@@ -89,25 +74,18 @@ void PositionControl::setHorizontalThrustMargin(const float margin)
 
 void PositionControl::updateHoverThrust(const float hover_thrust_new)
 {
-	/*
-	 * This function is kept for compatibility with the existing PX4
-	 * hover-thrust estimator.
-	 *
-	 * The geometric controller does not currently use _vel_int, but
-	 * keeping this compensation allows integral action to be added later
-	 * without changing the public interface.
-	 */
-
+	// Given that the equation for thrust is T = a_sp * Th / g - Th
+	// with a_sp = desired acceleration, Th = hover thrust and g = gravity constant,
+	// we want to find the acceleration that needs to be added to the integrator in order obtain
+	// the same thrust after replacing the current hover thrust by the new one.
+	// T' = T => a_sp' * Th' / g - Th' = a_sp * Th / g - Th
+	// so a_sp' = (a_sp - g) * Th / Th' + g
+	// we can then add a_sp' - a_sp to the current integrator to absorb the effect of changing Th by Th'
 	const float previous_hover_thrust = _hover_thrust;
-
 	setHoverThrust(hover_thrust_new);
 
-	_vel_int(2) +=
-		(_acc_sp(2) - CONSTANTS_ONE_G)
-		* previous_hover_thrust
-		/ _hover_thrust
-		+ CONSTANTS_ONE_G
-		- _acc_sp(2);
+	_vel_int(2) += (_acc_sp(2) - CONSTANTS_ONE_G) * previous_hover_thrust / _hover_thrust
+		       + CONSTANTS_ONE_G - _acc_sp(2);
 }
 
 void PositionControl::setState(const PositionControlStates &states)
@@ -118,399 +96,187 @@ void PositionControl::setState(const PositionControlStates &states)
 	_vel_dot = states.acceleration;
 }
 
-void PositionControl::setInputSetpoint(
-	const trajectory_setpoint_s &setpoint)
+void PositionControl::setInputSetpoint(const trajectory_setpoint_s &setpoint)
 {
 	_pos_sp = Vector3f(setpoint.position);
 	_vel_sp = Vector3f(setpoint.velocity);
 	_acc_sp = Vector3f(setpoint.acceleration);
-
 	_yaw_sp = setpoint.yaw;
 	_yawspeed_sp = setpoint.yawspeed;
 }
 
 bool PositionControl::update(const float dt)
 {
-	/*
-	 * The first geometric implementation is not dynamic and therefore
-	 * does not require dt. It will be needed later if integral action,
-	 * filters, or higher-order reference dynamics are added.
-	 */
-	(void)dt;
-
-	const bool valid = _inputValid();
+	bool valid = _inputValid();
 
 	if (valid) {
-		_geometricTrackingControl();
+		_positionControl();
+		_velocityControl(dt);
 
-		_yawspeed_sp =
-			PX4_ISFINITE(_yawspeed_sp)
-			? _yawspeed_sp
-			: 0.f;
-
-		_yaw_sp =
-			PX4_ISFINITE(_yaw_sp)
-			? _yaw_sp
-			: _yaw;
+		_yawspeed_sp = PX4_ISFINITE(_yawspeed_sp) ? _yawspeed_sp : 0.f;
+		_yaw_sp = PX4_ISFINITE(_yaw_sp) ? _yaw_sp : _yaw; // TODO: better way to disable yaw control
 	}
 
-	/*
-	 * A valid acceleration and thrust setpoint must be generated.
-	 */
-	return valid
-	       && _acc_sp.isAllFinite()
-	       && _thr_sp.isAllFinite();
+	// There has to be a valid output acceleration and thrust setpoint otherwise something went wrong
+	return valid && _acc_sp.isAllFinite() && _thr_sp.isAllFinite();
+}
+void PositionControl::_positionControl()
+{
+	// Direct PD+FF law: a_sp = ddx_d + kp*ep + kv*ev
+	// No computation needed here; see _velocityControl().
 }
 
-void PositionControl::_geometricTrackingControl()
+void PositionControl::_velocityControl(const float dt)
 {
-	Vector3f position_error;
-	Vector3f velocity_error;
-	Vector3f acceleration_feedforward;
+	// --- Constant gains (hardcoded for testing) ---
+	// Replace with tuned values; keep xy and z separate since a quadrotor's
+	// vertical and horizontal dynamics are rarely symmetric.
+	static constexpr float KP_XY = 4.0f;
+	static constexpr float KP_Z  = 4.0f;
+	static constexpr float KV_XY = 4.0f;
+	static constexpr float KV_Z  = 4.0f;
 
-	position_error.setZero();
-	velocity_error.setZero();
-	acceleration_feedforward.setZero();
+	const Vector3f k_p(KP_XY, KP_XY, KP_Z);
+	const Vector3f k_v(KV_XY, KV_XY, KV_Z);
 
-	/*
-	 * Translational tracking errors:
-	 *
-	 * e_p = p - p_d
-	 * e_v = v - v_d
-	 *
-	 * Geometric acceleration command:
-	 *
-	 * a_c = a_d - K_p e_p - K_v e_v
-	 */
+	// --- Position error: ep = x_d - x ---
+	Vector3f e_p = _pos_sp - _pos;
+	ControlMath::setZeroIfNanVector3f(e_p);
 
-	for (int axis = 0; axis < 3; axis++) {
+	// --- Velocity error: ev = ẋ_d - ẋ ---
+	Vector3f e_v = _vel_sp - _vel;
+	ControlMath::setZeroIfNanVector3f(e_v);
 
-		const bool position_setpoint_valid =
-			PX4_ISFINITE(_pos_sp(axis));
+	// --- Feedforward acceleration: ẍ_d ---
+	Vector3f acc_ff = _acc_sp;
+	ControlMath::setZeroIfNanVector3f(acc_ff);
 
-		const bool velocity_setpoint_valid =
-			PX4_ISFINITE(_vel_sp(axis));
+	// a_sp = ddx_d + kp*ep + kv*ev
+	_acc_sp = acc_ff + e_p.emult(k_p) + e_v.emult(k_v);
 
-		const bool acceleration_setpoint_valid =
-			PX4_ISFINITE(_acc_sp(axis));
-
-		/*
-		 * Position error.
-		 *
-		 * When there is no position setpoint, the position-error
-		 * contribution is disabled for this axis.
-		 */
-		if (position_setpoint_valid) {
-			position_error(axis) =
-				_pos(axis) - _pos_sp(axis);
-		}
-
-		/*
-		 * Desired velocity.
-		 *
-		 * A finite velocity setpoint is treated as trajectory
-		 * feed-forward.
-		 *
-		 * When position control is active but no velocity reference is
-		 * supplied, the desired velocity is assumed to be zero.
-		 */
-		if (position_setpoint_valid || velocity_setpoint_valid) {
-
-			const float desired_velocity =
-				velocity_setpoint_valid
-				? _vel_sp(axis)
-				: 0.f;
-
-			velocity_error(axis) =
-				_vel(axis) - desired_velocity;
-
-			/*
-			 * Store the velocity reference that was actually used.
-			 * This value is later published in
-			 * vehicle_local_position_setpoint.
-			 */
-			_vel_sp(axis) = desired_velocity;
-		}
-
-		/*
-		 * Desired acceleration feed-forward.
-		 *
-		 * When acceleration is NAN, no acceleration feed-forward
-		 * is applied.
-		 */
-		if (acceleration_setpoint_valid) {
-			acceleration_feedforward(axis) =
-				_acc_sp(axis);
-		}
-	}
-
-	/*
-	 * PX4 parameter mapping
-	 * ---------------------
-	 *
-	 * The original PX4 controller approximately produces:
-	 *
-	 * a_c =
-	 *     a_d
-	 *     + K_vel K_pos (p_d - p)
-	 *     + K_vel (v_d - v)
-	 *
-	 * Therefore, for the direct geometric tracking law:
-	 *
-	 * K_p_geo = K_pos_PX4 .* K_vel_PX4
-	 * K_v_geo = K_vel_PX4
-	 *
-	 * This keeps the existing PX4 parameter dimensions consistent.
-	 */
-	const Vector3f geometric_position_gain =
-		_gain_pos_p.emult(_gain_vel_p);
-
-	const Vector3f geometric_velocity_gain =
-		_gain_vel_p;
-
-	_acc_sp =
-		acceleration_feedforward
-		- position_error.emult(geometric_position_gain)
-		- velocity_error.emult(geometric_velocity_gain);
-
-	/*
-	 * Convert the commanded inertial acceleration into a desired
-	 * body-z direction and normalized thrust vector.
-	 */
 	_accelerationControl();
 
-	/*
-	 * Thrust saturation
-	 * -----------------
-	 *
-	 * Preserve the original PX4 strategy:
-	 *
-	 * 1. Reserve a horizontal-thrust margin.
-	 * 2. Prioritize vertical thrust.
-	 * 3. Limit the remaining horizontal thrust.
-	 */
-
+	// --- Saturation handling (unchanged) ---
 	const Vector2f thrust_sp_xy(_thr_sp);
 	const float thrust_sp_xy_norm = thrust_sp_xy.norm();
+	const float thrust_max_squared = math::sq(_lim_thr_max);
 
-	const float thrust_max_squared =
-		math::sq(_lim_thr_max);
+	const float allocated_horizontal_thrust = math::min(thrust_sp_xy_norm, _lim_thr_xy_margin);
+	const float thrust_z_max_squared = thrust_max_squared - math::sq(allocated_horizontal_thrust);
 
-	const float allocated_horizontal_thrust =
-		math::min(
-			thrust_sp_xy_norm,
-			_lim_thr_xy_margin);
+	_thr_sp(2) = math::max(_thr_sp(2), -sqrtf(thrust_z_max_squared));
 
-	const float thrust_z_max_squared =
-		math::max(
-			0.f,
-			thrust_max_squared
-			- math::sq(allocated_horizontal_thrust));
+	const float thrust_max_xy_squared = thrust_max_squared - math::sq(_thr_sp(2));
+	float thrust_max_xy = 0.f;
 
-	/*
-	 * In PX4 NED/FRD convention, upward thrust has a negative
-	 * z component.
-	 */
-	_thr_sp(2) =
-		math::max(
-			_thr_sp(2),
-			-sqrtf(thrust_z_max_squared));
+	if (thrust_max_xy_squared > 0.f) {
+		thrust_max_xy = sqrtf(thrust_max_xy_squared);
+	}
 
-	const float thrust_max_xy_squared =
-		math::max(
-			0.f,
-			thrust_max_squared
-			- math::sq(_thr_sp(2)));
-
-	const float thrust_max_xy =
-		sqrtf(thrust_max_xy_squared);
-
-	if ((thrust_sp_xy_norm > thrust_max_xy)
-	    && (thrust_sp_xy_norm > FLT_EPSILON)) {
-
-		_thr_sp.xy() =
-			thrust_sp_xy
-			* (thrust_max_xy / thrust_sp_xy_norm);
+	if (thrust_sp_xy_norm > thrust_max_xy) {
+		_thr_sp.xy() = thrust_sp_xy / thrust_sp_xy_norm * thrust_max_xy;
 	}
 }
-
 void PositionControl::_accelerationControl()
 {
 	const Vector3f e3(0.f, 0.f, 1.f);
+	static constexpr float _vehicle_mass  = 1.5f;
 
 	/*
-	 * Translational dynamics in the PX4 NED/FRD convention:
+	 * Physical desired thrust force:
 	 *
-	 * m a_c = m g e3 - f b3
-	 *
-	 * Therefore:
-	 *
-	 * f b3 = m (g e3 - a_c)
-	 *
-	 * and the desired body-z direction is:
-	 *
-	 * b3_d =
-	 *     (g e3 - a_c)
-	 *     / ||g e3 - a_c||
+	 *     F_d = m * (g * e3 - a_sp)
 	 */
+	Vector3f desired_force =
+		_vehicle_mass * (CONSTANTS_ONE_G * e3 - _acc_sp);
 
-	Vector3f specific_thrust_direction =
-		CONSTANTS_ONE_G * e3 - _acc_sp;
 
 	/*
-	 * Protect normalization from the singular case:
+	 * Desired body z-axis:
 	 *
-	 * g e3 - a_c = 0.
+	 *     b3_d = R_d * e3 = F_d / ||F_d||
 	 */
-	if (specific_thrust_direction.norm_squared() < 1e-6f) {
-		specific_thrust_direction = e3;
-	}
+	Vector3f R_d_e3 = desired_force.normalized();
 
-	Vector3f body_z =
-		specific_thrust_direction.normalized();
+	ControlMath::limitTilt(R_d_e3, e3, _lim_tilt);
 
 	/*
-	 * Apply PX4's maximum tilt constraint.
-	 */
-	ControlMath::limitTilt(
-		body_z,
-		e3,
-		_lim_tilt);
-
-	/*
-	 * Vertical normalized thrust required to produce the requested
-	 * vertical acceleration:
+	 * Physical thrust magnitude in newtons:
 	 *
-	 * T_z = a_z Th/g - Th
+	 *     f_z = F_d^T * R_d * e3
+	 */
+	const float fz_newtons =
+		desired_force.dot(R_d_e3);
+
+	/*
+	 * Convert thrust in newtons to PX4 normalized thrust.
 	 *
-	 * where Th is the normalized hover thrust.
+	 * Hover:
+	 *
+	 *     mg  <-->  hover_thrust
 	 */
-	const float thrust_ned_z =
-		_acc_sp(2)
-		* (_hover_thrust / CONSTANTS_ONE_G)
-		- _hover_thrust;
+	float fz_normalized =
+		-_hover_thrust
+		* fz_newtons
+		/ (_vehicle_mass * CONSTANTS_ONE_G);
+
+	fz_normalized = math::constrain(
+				fz_normalized,
+				-_lim_thr_max,
+				-_lim_thr_min);
 
 	/*
-	 * Project the vertical thrust requirement onto the desired
-	 * body-z direction.
+	 * Normalized thrust vector:
+	 *
+	 *     T_sp = fz_normalized * R_d * e3
 	 */
-	const float cos_ned_body =
-		math::max(
-			e3.dot(body_z),
-			1e-3f);
-
-	/*
-	 * PX4 thrust is negative along body z in the NED/FRD convention.
-	 */
-	const float collective_thrust =
-		math::min(
-			thrust_ned_z / cos_ned_body,
-			-_lim_thr_min);
-
-	_thr_sp = body_z * collective_thrust;
+	_thr_sp = fz_normalized * R_d_e3;
 }
 
 bool PositionControl::_inputValid()
 {
 	bool valid = true;
 
-	/*
-	 * Every axis must contain at least one valid setpoint:
-	 *
-	 * position, velocity, or acceleration.
-	 */
-	for (int axis = 0; axis < 3; axis++) {
-
-		valid =
-			valid
-			&& (
-				PX4_ISFINITE(_pos_sp(axis))
-				|| PX4_ISFINITE(_vel_sp(axis))
-				|| PX4_ISFINITE(_acc_sp(axis))
-			);
+	// Every axis x, y, z needs to have some setpoint
+	for (int i = 0; i <= 2; i++) {
+		valid = valid && (PX4_ISFINITE(_pos_sp(i)) || PX4_ISFINITE(_vel_sp(i)) || PX4_ISFINITE(_acc_sp(i)));
 	}
 
-	/*
-	 * Horizontal x and y setpoints must always be provided in pairs.
-	 */
-	valid =
-		valid
-		&& (
-			PX4_ISFINITE(_pos_sp(0))
-			== PX4_ISFINITE(_pos_sp(1))
-		);
+	// x and y input setpoints always have to come in pairs
+	valid = valid && (PX4_ISFINITE(_pos_sp(0)) == PX4_ISFINITE(_pos_sp(1)));
+	valid = valid && (PX4_ISFINITE(_vel_sp(0)) == PX4_ISFINITE(_vel_sp(1)));
+	valid = valid && (PX4_ISFINITE(_acc_sp(0)) == PX4_ISFINITE(_acc_sp(1)));
 
-	valid =
-		valid
-		&& (
-			PX4_ISFINITE(_vel_sp(0))
-			== PX4_ISFINITE(_vel_sp(1))
-		);
-
-	valid =
-		valid
-		&& (
-			PX4_ISFINITE(_acc_sp(0))
-			== PX4_ISFINITE(_acc_sp(1))
-		);
-
-	/*
-	 * Validate all states required by the geometric controller.
-	 */
-	for (int axis = 0; axis < 3; axis++) {
-
-		const bool position_control_active =
-			PX4_ISFINITE(_pos_sp(axis));
-
-		const bool velocity_control_active =
-			PX4_ISFINITE(_vel_sp(axis));
-
-		if (position_control_active) {
-			valid =
-				valid
-				&& PX4_ISFINITE(_pos(axis))
-				&& PX4_ISFINITE(_vel(axis));
+	// For each controlled state the estimate has to be valid
+	for (int i = 0; i <= 2; i++) {
+		if (PX4_ISFINITE(_pos_sp(i))) {
+			valid = valid && PX4_ISFINITE(_pos(i));
 		}
 
-		if (velocity_control_active) {
-			valid =
-				valid
-				&& PX4_ISFINITE(_vel(axis));
+		if (PX4_ISFINITE(_vel_sp(i))) {
+			valid = valid && PX4_ISFINITE(_vel(i)) && PX4_ISFINITE(_vel_dot(i));
 		}
 	}
 
 	return valid;
 }
 
-void PositionControl::getLocalPositionSetpoint(
-	vehicle_local_position_setpoint_s &local_position_setpoint) const
+void PositionControl::getLocalPositionSetpoint(vehicle_local_position_setpoint_s &local_position_setpoint) const
 {
 	local_position_setpoint.x = _pos_sp(0);
 	local_position_setpoint.y = _pos_sp(1);
 	local_position_setpoint.z = _pos_sp(2);
-
 	local_position_setpoint.yaw = _yaw_sp;
 	local_position_setpoint.yawspeed = _yawspeed_sp;
-
 	local_position_setpoint.vx = _vel_sp(0);
 	local_position_setpoint.vy = _vel_sp(1);
 	local_position_setpoint.vz = _vel_sp(2);
-
-	_acc_sp.copyTo(
-		local_position_setpoint.acceleration);
-
-	_thr_sp.copyTo(
-		local_position_setpoint.thrust);
+	_acc_sp.copyTo(local_position_setpoint.acceleration);
+	_thr_sp.copyTo(local_position_setpoint.thrust);
 }
 
-void PositionControl::getAttitudeSetpoint(
-	vehicle_attitude_setpoint_s &attitude_setpoint) const
+void PositionControl::getAttitudeSetpoint(vehicle_attitude_setpoint_s &attitude_setpoint) const
 {
-	ControlMath::thrustToAttitude(
-		_thr_sp,
-		_yaw_sp,
-		attitude_setpoint);
-
-	attitude_setpoint.yaw_sp_move_rate =
-		_yawspeed_sp;
+	ControlMath::thrustToAttitude(_thr_sp, _yaw_sp, attitude_setpoint);
+	attitude_setpoint.yaw_sp_move_rate = _yawspeed_sp;
 }

@@ -184,7 +184,11 @@ public:
 	 * @param attitude_setpoint reference to struct to fill up
 	 */
 	void getAttitudeSetpoint(vehicle_attitude_setpoint_s &attitude_setpoint) const;
+// PositionControl.hpp
+// PositionControl.hpp
+matrix::Dcmf _R;  // default constructor already initializes to identity
 
+void setAttitude(const matrix::Dcmf &R) { _R = R; }
 	/**
 	 * All setpoints are set to NAN (uncontrolled). Timestampt zero.
 	 */
@@ -200,7 +204,6 @@ private:
 	void _positionControl(); ///< Position proportional control
 	void _velocityControl(const float dt); ///< Velocity PID control
 	void _accelerationControl(); ///< Acceleration setpoint processing
-void _geometricTrackingControl();
 
 	// Gains
 	matrix::Vector3f _gain_pos_p; ///< Position control proportional gain
