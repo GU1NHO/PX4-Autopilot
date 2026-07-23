@@ -172,33 +172,22 @@ void PositionControl::_velocityControl(const float dt)
 
 	_accelerationControl();
 
-	// --- Saturation handling (unchanged) ---
-	const Vector2f thrust_sp_xy(_thr_sp);
-	const float thrust_sp_xy_norm = thrust_sp_xy.norm();
-	const float thrust_max_squared = math::sq(_lim_thr_max);
-
-	const float allocated_horizontal_thrust = math::min(thrust_sp_xy_norm, _lim_thr_xy_margin);
-	const float thrust_z_max_squared = thrust_max_squared - math::sq(allocated_horizontal_thrust);
-
-	_thr_sp(2) = math::max(_thr_sp(2), -sqrtf(thrust_z_max_squared));
-
-	const float thrust_max_xy_squared = thrust_max_squared - math::sq(_thr_sp(2));
-	float thrust_max_xy = 0.f;
-
-	if (thrust_max_xy_squared > 0.f) {
-		thrust_max_xy = sqrtf(thrust_max_xy_squared);
-	}
-
-	if (thrust_sp_xy_norm > thrust_max_xy) {
-		_thr_sp.xy() = thrust_sp_xy / thrust_sp_xy_norm * thrust_max_xy;
-	}
+	// NOTE: the old post-projection saturation block that used to live here
+	// (clamping _thr_sp xy/z against _lim_thr_max/_lim_thr_xy_margin) has been
+	// removed. It operated on the *projected, body-frame* thrust scalar
+	// (fz_normalized * e3), which is no longer computed here — see
+	// _accelerationControl(). The min/max clamp is now applied downstream in
+	// MulticopterRateControl::Run(), after the world-frame vector below is
+	// projected onto the current body-z axis.
 }
 void PositionControl::_accelerationControl()
 {
 	const Vector3f e3(0.f, 0.f, 1.f);
 
 /*
- * Desired specific-force direction:
+ * Desired specific-force direction, used only to derive the desired
+ * body-z axis (b3_d) below. This is *not* used to compute a thrust
+ * magnitude here anymore -- see the note further down.
  *
  *     g*e3 - a_sp
  */
@@ -220,72 +209,25 @@ if (specific_thrust_direction.norm_squared() > 1e-6f) {
  * Limit the desired tilt.
  */
 ControlMath::limitTilt(R_d_e3, e3, _lim_tilt);
-
-/*
- * Current body-z axis expressed in the NED frame:
- *
- *     R*e3
- */
-Vector3f R_e3 = _R.col(2);
-
-if (!R_e3.isAllFinite()
-    || R_e3.norm_squared() < 1e-6f) {
-
-	R_e3 = e3;
-}
-
-R_e3.normalize();
-
-/*
- * Actual translational dynamics:
- *
- *     m*a = m*g*e3 + R*fz*e3
- *
- * Projecting the desired translational force onto the current
- * thrust direction R*e3 gives:
- *
- *     fz_d
- *       = m*(a_sp - g*e3)^T * R*e3
- *
- *       = -m*(g*e3 - a_sp)^T * R*e3
- *
- * PX4 normalized thrust:
- *
- *     -m*g  <-->  -hover_thrust
- *
- * Therefore:
- *
- *     fz_normalized
- *       = -hover_thrust/g
- *         * (g*e3 - a_sp)^T * R*e3
- */
-float fz_normalized =
-	-_hover_thrust
-	* specific_thrust_direction.dot(R_e3)
-	/ CONSTANTS_ONE_G;
-
-/*
- * More negative means more collective thrust.
- */
-fz_normalized = math::constrain(
-	fz_normalized,
-	-_lim_thr_max,
-	-_lim_thr_min
-);
-
-/*
- * The commanded thrust direction must remain the desired one:
- *
- *     T_sp = fz_normalized * R_d*e3
- *
- * ControlMath::thrustToAttitude() will recover:
- *
- *     R_d*e3 = -T_sp / ||T_sp||
- *
- * because fz_normalized is negative.
- */
-_thr_sp = fz_normalized *e3;
 b3_d = R_d_e3;
+
+/*
+ * NOTE: PositionControl no longer computes a thrust value at all. It used
+ * to project (g*e3 - a_sp) onto the current body-z axis, scale by
+ * hover_thrust/g, and clamp to [-thr_max, -thr_min] -- all of that (the
+ * hover-thrust scaling, the projection onto R, and the clamp) has moved to
+ * MulticopterRateControl::Run(), which has the freshest attitude estimate.
+ *
+ * _thr_sp is reused purely as the transport for _acc_sp down through the
+ * existing vehicle_attitude_setpoint/vehicle_rates_setpoint.thrust_body
+ * field (mc_att_control passes thrust_body through untouched, so this
+ * field is a free ride to the rate controller without adding a new uORB
+ * topic). MulticopterRateControl::Run() reconstructs
+ * "g*e3 - a_sp", scales it by its own hover_thrust estimate, projects onto
+ * the current R*e3, and clamps -- reproducing exactly the formula that
+ * used to live here.
+ */
+_thr_sp = _acc_sp;
 }
 bool PositionControl::_inputValid()
 {

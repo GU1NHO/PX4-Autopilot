@@ -35,6 +35,7 @@
 
 #include <drivers/drv_hrt.h>
 #include <circuit_breaker/circuit_breaker.h>
+#include <geo/geo.h>
 #include <mathlib/math/Limits.hpp>
 #include <mathlib/math/Functions.hpp>
 #include <px4_platform_common/events.h>
@@ -148,6 +149,23 @@ MulticopterRateControl::Run()
 
 		_vehicle_status_sub.update(&_vehicle_status);
 
+		// Mirrors MulticopterPositionControl's own hover-thrust bookkeeping
+		// (that copy stays there for velocity-integrator anti-windup, which
+		// is unrelated to this one). Needed here since the thrust-magnitude
+		// calculation moved from PositionControl into this Run() below.
+		if (_param_mpc_use_hte.get()) {
+			hover_thrust_estimate_s hte;
+
+			if (_hover_thrust_estimate_sub.update(&hte)) {
+				if (hte.valid) {
+					_hover_thrust = math::constrain(hte.hover_thrust, 0.05f, 0.9f);
+				}
+			}
+
+		} else {
+			_hover_thrust = _param_mpc_thr_hover.get();
+		}
+
 		// use rates setpoint topic
 		vehicle_rates_setpoint_s vehicle_rates_setpoint{};
 
@@ -165,6 +183,8 @@ MulticopterRateControl::Run()
 				_rates_setpoint = man_rate_sp.emult(_acro_rate_max);
 				_thrust_setpoint(2) = -(manual_control_setpoint.throttle + 1.f) * .5f;
 				_thrust_setpoint(0) = _thrust_setpoint(1) = 0.f;
+				// already a body-frame thrust command, nothing left to project
+				_thrust_setpoint_needs_projection = false;
 
 				// publish rate setpoint
 				vehicle_rates_setpoint.roll = _rates_setpoint(0);
@@ -182,6 +202,11 @@ MulticopterRateControl::Run()
 				_rates_setpoint(1) = PX4_ISFINITE(vehicle_rates_setpoint.pitch) ? vehicle_rates_setpoint.pitch : rates(1);
 				_rates_setpoint(2) = PX4_ISFINITE(vehicle_rates_setpoint.yaw)   ? vehicle_rates_setpoint.yaw   : rates(2);
 				_thrust_setpoint = Vector3f(vehicle_rates_setpoint.thrust_body);
+				// this is actually a_sp (raw acceleration setpoint) from
+				// PositionControl, still needs the full g*e3 - a_sp ->
+				// hover_thrust scale -> project onto current body-z -> clamp
+				// pipeline below
+				_thrust_setpoint_needs_projection = true;
 			}
 		}
 
@@ -246,11 +271,51 @@ MulticopterRateControl::Run()
 			rate_ctrl_status.timestamp = hrt_absolute_time();
 			_controller_status_pub.publish(rate_ctrl_status);
 
+			// The entire thrust-magnitude computation that used to live in
+			// PositionControl::_accelerationControl() now happens here instead,
+			// using the freshest attitude estimate available (rather than the
+			// staler one PositionControl sees at its slower loop rate).
+			// _thrust_setpoint holds the raw acceleration setpoint a_sp in this
+			// case (see _thrust_setpoint_needs_projection above), so we
+			// reconstruct the exact same formula PositionControl used to run:
+			//
+			//     specific_thrust_direction = g*e3 - a_sp
+			//     fz_normalized = -hover_thrust/g * specific_thrust_direction . R*e3
+			//     fz_normalized = constrain(fz_normalized, -thr_max, -thr_min)
+			Vector3f thrust_setpoint_body = _thrust_setpoint;
+
+			if (_thrust_setpoint_needs_projection) {
+				vehicle_attitude_s vehicle_attitude;
+
+				if (_vehicle_attitude_sub.copy(&vehicle_attitude)) {
+					_R = Dcmf(Quatf(vehicle_attitude.q));
+				}
+
+				Vector3f R_e3 = _R.col(2);
+
+				if (!R_e3.isAllFinite() || R_e3.norm_squared() < 1e-6f) {
+					R_e3 = Vector3f(0.f, 0.f, 1.f);
+				}
+
+				R_e3.normalize();
+
+				const Vector3f e3(0.f, 0.f, 1.f);
+				const Vector3f specific_thrust_direction = CONSTANTS_ONE_G * e3 - _thrust_setpoint;
+
+				float fz_normalized = -_hover_thrust * specific_thrust_direction.dot(R_e3) / CONSTANTS_ONE_G;
+
+				// more negative means more collective thrust
+				fz_normalized = math::constrain(fz_normalized, -_param_mpc_thr_max.get(),
+								 -math::max(_param_mpc_thr_min.get(), 10e-4f));
+
+				thrust_setpoint_body = Vector3f(0.f, 0.f, fz_normalized);
+			}
+
 			// publish thrust and torque setpoints
 			vehicle_thrust_setpoint_s vehicle_thrust_setpoint{};
 			vehicle_torque_setpoint_s vehicle_torque_setpoint{};
 
-			_thrust_setpoint.copyTo(vehicle_thrust_setpoint.xyz);
+			thrust_setpoint_body.copyTo(vehicle_thrust_setpoint.xyz);
 			vehicle_torque_setpoint.xyz[0] = PX4_ISFINITE(torque_setpoint(0)) ? torque_setpoint(0) : 0.f;
 			vehicle_torque_setpoint.xyz[1] = PX4_ISFINITE(torque_setpoint(1)) ? torque_setpoint(1) : 0.f;
 			vehicle_torque_setpoint.xyz[2] = PX4_ISFINITE(torque_setpoint(2)) ? torque_setpoint(2) : 0.f;

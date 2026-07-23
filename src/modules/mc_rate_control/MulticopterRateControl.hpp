@@ -50,6 +50,7 @@
 #include <uORB/topics/actuator_controls_status.h>
 #include <uORB/topics/battery_status.h>
 #include <uORB/topics/control_allocator_status.h>
+#include <uORB/topics/hover_thrust_estimate.h>
 #include <uORB/topics/manual_control_setpoint.h>
 #include <uORB/topics/parameter_update.h>
 #include <uORB/topics/rate_ctrl_status.h>
@@ -57,6 +58,7 @@
 #include <uORB/topics/vehicle_control_mode.h>
 #include <uORB/topics/vehicle_land_detected.h>
 #include <uORB/topics/vehicle_rates_setpoint.h>
+#include <uORB/topics/vehicle_attitude.h>
 #include <uORB/topics/vehicle_status.h>
 #include <uORB/topics/vehicle_thrust_setpoint.h>
 #include <uORB/topics/vehicle_angular_acceleration_setpoint.h>
@@ -100,6 +102,8 @@ private:
 	uORB::Subscription _vehicle_land_detected_sub{ORB_ID(vehicle_land_detected)};
 	uORB::Subscription _vehicle_rates_setpoint_sub{ORB_ID(vehicle_rates_setpoint)};
 	uORB::Subscription _vehicle_status_sub{ORB_ID(vehicle_status)};
+	uORB::Subscription _vehicle_attitude_sub{ORB_ID(vehicle_attitude)};
+	uORB::Subscription _hover_thrust_estimate_sub{ORB_ID(hover_thrust_estimate)};
 	uORB::Subscription _vehicle_angular_acceleration_setpoint_sub{
 	ORB_ID(vehicle_angular_acceleration_setpoint)
 };
@@ -130,6 +134,29 @@ matrix::Vector3f _angular_acceleration_setpoint{};
 hrt_abstime _angular_acceleration_setpoint_timestamp{0};
 	float _battery_status_scale{0.0f};
 	matrix::Vector3f _thrust_setpoint{};
+
+	/**
+	 * True when _thrust_setpoint holds the raw acceleration setpoint a_sp
+	 * coming from PositionControl (normal position/attitude-tracking path),
+	 * and therefore still needs the full g*e3 - a_sp -> hover_thrust scale
+	 * -> project onto current body-z -> clamp pipeline in Run().
+	 * False in manual acro mode, where _thrust_setpoint is already a
+	 * body-frame thrust command derived directly from the throttle stick.
+	 */
+	bool _thrust_setpoint_needs_projection{false};
+
+	/** Current vehicle rotation matrix, used to project the world-frame
+	 *  thrust vector onto the current body-z axis (see Run()). */
+	matrix::Dcmf _R;
+
+	/**
+	 * Hover-thrust estimate, mirroring PositionControl's own copy (which is
+	 * still used there for velocity-integrator anti-windup and is otherwise
+	 * unrelated to this one). Needed here because the thrust-magnitude
+	 * calculation that used to live in PositionControl::_accelerationControl()
+	 * now runs entirely in Run().
+	 */
+	float _hover_thrust{0.5f};
 
 	float _energy_integration_time{0.0f};
 	float _control_energy[4] {};
@@ -167,6 +194,15 @@ hrt_abstime _angular_acceleration_setpoint_timestamp{0};
 		(ParamFloat<px4::params::MC_ACRO_SUPEXPO>) _param_mc_acro_supexpo,		/**< superexpo stick curve shape (roll & pitch) */
 		(ParamFloat<px4::params::MC_ACRO_SUPEXPOY>) _param_mc_acro_supexpoy,		/**< superexpo stick curve shape (yaw) */
 
-		(ParamBool<px4::params::MC_BAT_SCALE_EN>) _param_mc_bat_scale_en
+		(ParamBool<px4::params::MC_BAT_SCALE_EN>) _param_mc_bat_scale_en,
+
+		// Needed to reconstruct the collective thrust scalar in Run(), now
+		// that the full hover-thrust scaling / projection onto the current
+		// body-z axis / min-max clamp all happen here instead of in
+		// PositionControl::_accelerationControl(). See Run() below.
+		(ParamFloat<px4::params::MPC_THR_HOVER>) _param_mpc_thr_hover,
+		(ParamBool<px4::params::MPC_USE_HTE>) _param_mpc_use_hte,
+		(ParamFloat<px4::params::MPC_THR_MIN>) _param_mpc_thr_min,
+		(ParamFloat<px4::params::MPC_THR_MAX>) _param_mpc_thr_max
 	)
 };

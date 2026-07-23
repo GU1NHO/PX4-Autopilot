@@ -50,25 +50,22 @@ void thrustToAttitude(
 	const float yaw_sp,
 	vehicle_attitude_setpoint_s &att_sp)
 {
-	/*
-	 * PX4 normalized thrust points opposite to the desired body-z axis:
-	 *
-	 *     thr_sp = fz_normalized * b3_d
-	 *
-	 * where fz_normalized < 0.
-	 *
-	 * Therefore:
-	 *
-	 *     b3_d = -thr_sp / ||thr_sp||
-	 */
 	bodyzToAttitude(b3_d, yaw_sp, att_sp);
 
 	/*
-	 * PX4 collective thrust is applied along negative body z.
+	 * thr_sp carries no thrust value at all here: PositionControl reuses
+	 * this field purely as a transport for the raw acceleration setpoint
+	 * a_sp, expressed in the world (NED) frame. thrust_body is passed
+	 * through untouched by mc_att_control, so this is a free ride down to
+	 * MulticopterRateControl::Run(), which reconstructs "g*e3 - a_sp",
+	 * scales it by its own hover_thrust estimate, projects it onto the
+	 * *current* body-z axis, and clamps it to [-thr_max, -thr_min] -- all
+	 * using the freshest attitude estimate available, at the rate loop
+	 * rate. See MulticopterRateControl::Run().
 	 */
-	att_sp.thrust_body[0] = 0.f;
-	att_sp.thrust_body[1] = 0.f;
-	att_sp.thrust_body[2] = -thr_sp.norm();
+	att_sp.thrust_body[0] = thr_sp(0);
+	att_sp.thrust_body[1] = thr_sp(1);
+	att_sp.thrust_body[2] = thr_sp(2);
 }
 
 void limitTilt(Vector3f &body_unit, const Vector3f &world_unit, const float max_angle)
