@@ -216,30 +216,61 @@ MulticopterRateControl::Run()
 			}
 
 			// run rate controller
-			const Vector3f J_diag(0.029125f, 0.029125f, 0.055225f);
-
-	                const Vector3f Komega(10.0f, 10.0f, 10.0f);
-
-			Vector3f dw_s = (_rates_setpoint-rates.emult(Komega));
-			Vector3f attitude_setpoint = J_diag.emult(dw_s) + rates.cross(J_diag.emult(rates));
-
-			const Vector3f tau_max(2.96f, 1.83f, 0.84f);
-			Vector3f torque_setpoint;
-
-			torque_setpoint(0) = attitude_setpoint(0) / tau_max(0);
-			torque_setpoint(1) = attitude_setpoint(1) / tau_max(1);
-			torque_setpoint(2) = attitude_setpoint(2) / tau_max(2);
-
-			for (int i = 0; i < 3; i++) {
-				torque_setpoint(i) = math::constrain(torque_setpoint(i), -1.f, 1.f);
-			}
-
-
+			//Vector3f torque_setpoint =
+			//	_rate_control.update(rates, _rates_setpoint, angular_accel, dt, _maybe_landed || _landed);
 
 
 			// apply low-pass filtering on yaw axis to reduce high frequency torque caused by rotor acceleration
-			//torque_setpoint(2) = _output_lpf_yaw.update(torque_setpoint(2), dt);
+			Vector3f att_control;
 
+				const bool landed_or_maybe_landed = _maybe_landed || _landed;
+				const float thrust_norm = -_thrust_setpoint(2); // PX4 thrust is negative in body z
+
+				if (landed_or_maybe_landed || thrust_norm < 0.12f) {
+
+					/*
+					* During landing / landed / very low thrust:
+					* use the original PX4 rate controller.
+					*/
+					att_control = _rate_control.update(
+							rates,
+							_rates_setpoint,
+							angular_accel,
+							dt,
+							landed_or_maybe_landed
+						);
+
+				} else {
+
+					/*
+					* Custom rotational inverse dynamics:
+					*
+					* tau = J * Komega * (omega_sp - omega)
+					*       + omega x J omega
+					*/
+
+
+					const Vector3f J_diag(0.005f, 0.005f, 0.009f);
+					const Vector3f J_omega_dot_sp = J_diag.emult( _rates_setpoint);
+					const Vector3f J_omega = J_diag.emult(rates);
+					const Vector3f gyro_term = rates.cross(J_omega);
+
+					Vector3f tau_phys = J_omega_dot_sp + gyro_term;
+
+					/*
+					* Convert physical torque to normalized PX4 torque.
+					*/
+					const Vector3f tau_max(0.10f, 0.10f, 0.05f);
+
+
+	att_control(0) = tau_phys(0) / tau_max(0);
+	att_control(1) = tau_phys(1) / tau_max(1);
+	att_control(2) = tau_phys(2) / tau_max(2);
+
+	for (int i = 0; i < 3; i++) {
+		att_control(i) = math::constrain(att_control(i), -1.f, 1.f);
+	}
+}
 			// publish rate controller status
 			rate_ctrl_status_s rate_ctrl_status{};
 			_rate_control.getRateControlStatus(rate_ctrl_status);
@@ -251,9 +282,9 @@ MulticopterRateControl::Run()
 			vehicle_torque_setpoint_s vehicle_torque_setpoint{};
 
 			_thrust_setpoint.copyTo(vehicle_thrust_setpoint.xyz);
-			vehicle_torque_setpoint.xyz[0] = PX4_ISFINITE(torque_setpoint(0)) ? torque_setpoint(0) : 0.f;
-			vehicle_torque_setpoint.xyz[1] = PX4_ISFINITE(torque_setpoint(1)) ? torque_setpoint(1) : 0.f;
-			vehicle_torque_setpoint.xyz[2] = PX4_ISFINITE(torque_setpoint(2)) ? torque_setpoint(2) : 0.f;
+			vehicle_torque_setpoint.xyz[0] = PX4_ISFINITE(att_control(0)) ? att_control(0) : 0.f;
+			vehicle_torque_setpoint.xyz[1] = PX4_ISFINITE(att_control(1)) ? att_control(1) : 0.f;
+			vehicle_torque_setpoint.xyz[2] = PX4_ISFINITE(att_control(2)) ? att_control(2) : 0.f;
 
 			// scale setpoints by battery status if enabled
 			if (_param_mc_bat_scale_en.get()) {

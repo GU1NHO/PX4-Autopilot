@@ -50,6 +50,7 @@ struct PositionControlStates {
 	matrix::Vector3f velocity;
 	matrix::Vector3f acceleration;
 	float yaw;
+
 };
 
 /**
@@ -183,58 +184,76 @@ public:
 	 * It needs to be executed by the attitude controller to achieve velocity and position tracking.
 	 * @param attitude_setpoint reference to struct to fill up
 	 */
-	void getAttitudeSetpoint(vehicle_attitude_setpoint_s &attitude_setpoint) const;
 // PositionControl.hpp
 // PositionControl.hpp
-matrix::Dcmf _R;  // default constructor already initializes to identity
-
-void setAttitude(const matrix::Dcmf &R) { _R = R; }
+//matrix::Dcmf _R;  // default constructor already initializes to identity
 	/**
-	 * All setpoints are set to NAN (uncontrolled). Timestampt zero.
+	 * Get the controller output attitude setpoint.
+	 */
+	void getAttitudeSetpoint(
+		vehicle_attitude_setpoint_s &attitude_setpoint) const;
+
+	/**
+	 * Pass the current vehicle rotation matrix to PositionControl.
+	 *
+	 * R maps vectors from the body FRD frame to the world NED frame.
+	 */
+	void setAttitude(const matrix::Quatf &q);
+
+	/**
+	 * All setpoints are set to NAN.
+	 * Timestamp is set to zero.
 	 */
 	static const trajectory_setpoint_s empty_trajectory_setpoint;
 
 private:
-	// The range limits of the hover thrust configuration/estimate
+	// Range limits of the hover-thrust configuration/estimate
 	static constexpr float HOVER_THRUST_MIN = 0.05f;
 	static constexpr float HOVER_THRUST_MAX = 0.9f;
 
 	bool _inputValid();
 
-	void _positionControl(); ///< Position proportional control
-	void _velocityControl(const float dt); ///< Velocity PID control
-	void _accelerationControl(); ///< Acceleration setpoint processing
+	void _positionControl();
+	void _velocityControl(const float dt);
+	void _accelerationControl();
 
 	// Gains
-	matrix::Vector3f _gain_pos_p; ///< Position control proportional gain
-	matrix::Vector3f _gain_vel_p; ///< Velocity control proportional gain
-	matrix::Vector3f _gain_vel_i; ///< Velocity control integral gain
-	matrix::Vector3f _gain_vel_d; ///< Velocity control derivative gain
+	matrix::Vector3f _gain_pos_p;
+	matrix::Vector3f _gain_vel_p;
+	matrix::Vector3f _gain_vel_i;
+	matrix::Vector3f _gain_vel_d;
 
 	// Limits
-	float _lim_vel_horizontal{}; ///< Horizontal velocity limit with feed forward and position control
-	float _lim_vel_up{}; ///< Upwards velocity limit with feed forward and position control
-	float _lim_vel_down{}; ///< Downwards velocity limit with feed forward and position control
-	float _lim_thr_min{}; ///< Minimum collective thrust allowed as output [-1,0] e.g. -0.9
-	float _lim_thr_max{}; ///< Maximum collective thrust allowed as output [-1,0] e.g. -0.1
-	float _lim_thr_xy_margin{}; ///< Margin to keep for horizontal control when saturating prioritized vertical thrust
-	float _lim_tilt{}; ///< Maximum tilt from level the output attitude is allowed to have
+	float _lim_vel_horizontal{};
+	float _lim_vel_up{};
+	float _lim_vel_down{};
+	float _lim_thr_min{};
+	float _lim_thr_max{};
+	float _lim_thr_xy_margin{};
+	float _lim_tilt{};
 
-	float _hover_thrust{}; ///< Thrust [HOVER_THRUST_MIN, HOVER_THRUST_MAX] with which the vehicle hovers not accelerating down or up with level orientation
-	bool _decouple_horizontal_and_vertical_acceleration{true}; ///< Ignore vertical acceleration setpoint to remove its effect on the tilt setpoint
+	float _hover_thrust{};
 
-	// States
-	matrix::Vector3f _pos; /**< current position */
-	matrix::Vector3f _vel; /**< current velocity */
-	matrix::Vector3f _vel_dot; /**< velocity derivative (replacement for acceleration estimate) */
-	matrix::Vector3f _vel_int; /**< integral term of the velocity controller */
-	float _yaw{}; /**< current heading */
+	bool _decouple_horizontal_and_vertical_acceleration{true};
+
+	// Current vehicle states
+	matrix::Vector3f _pos;
+	matrix::Vector3f _vel;
+	matrix::Vector3f _vel_dot;
+	matrix::Vector3f _vel_int;
+	float _yaw{};
+
+
 
 	// Setpoints
-	matrix::Vector3f _pos_sp; /**< desired position */
-	matrix::Vector3f _vel_sp; /**< desired velocity */
-	matrix::Vector3f _acc_sp; /**< desired acceleration */
-	matrix::Vector3f _thr_sp; /**< desired thrust */
-	float _yaw_sp{}; /**< desired heading */
-	float _yawspeed_sp{}; /** desired yaw-speed */
+	matrix::Vector3f _pos_sp;
+	matrix::Vector3f _vel_sp;
+	matrix::Vector3f _acc_sp;
+	matrix::Vector3f _thr_sp;
+	matrix::Vector3f b3_d;
+	matrix::Dcmf _R{
+    matrix::Eulerf(0.f, 0.f, 0.f)
+};
+	float _yaw_sp{};
+	float _yawspeed_sp{};
 };

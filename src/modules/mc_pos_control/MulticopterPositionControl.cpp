@@ -566,6 +566,24 @@ void MulticopterPositionControl::Run()
 				_control.resetIntegralXY();
 			}
 
+				/*
+				* Update current attitude.
+				*/
+				_vehicle_attitude_sub.update(
+					&_vehicle_attitude
+				);
+
+				matrix::Quatf q{
+					_vehicle_attitude.q
+				};
+
+				if (_vehicle_attitude.timestamp != 0
+				&& q.isAllFinite()
+				&& q.norm_squared() > 1e-6f) {
+
+					q.normalize();
+					_control.setAttitude(q);
+				}
 			_control.setState(states);
 
 			const hrt_abstime now = hrt_absolute_time();

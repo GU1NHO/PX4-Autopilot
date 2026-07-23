@@ -41,7 +41,6 @@
 
 #include <float.h>
 #include <math.h>
-
 #include <px4_platform_common/defines.h>
 
 using namespace matrix;
@@ -273,97 +272,6 @@ void AttitudeControl::setAttitudeSetpoint(
 Vector3f AttitudeControl::update(
 	const Dcmf &R) const
 {
-	const Vector3f e3(0.f, 0.f, 1.f);
-
-	const Dcmf &R_d =
-		_attitude_setpoint_R;
-
-	/*
-	 * Relative attitude:
-	 *
-	 *     R_e = R^T R_d
-	 */
-	const Dcmf R_e =
-		R.transpose() * R_d;
-
-	/*
-	 * Geometric attitude error:
-	 *
-	 *     e_R =
-	 *       0.5(R^T R_d - R_d^T R)^vee
-	 */
-	Vector3f e_R;
-
-	e_R(0) =
-		0.5f
-		* (R_e(2, 1) - R_e(1, 2));
-
-	e_R(1) =
-		0.5f
-		* (R_e(0, 2) - R_e(2, 0));
-
-	e_R(2) =
-		0.5f
-		* (R_e(1, 0) - R_e(0, 1));
-
-	/*
-	 * Optional yaw prioritization.
-	 */
-	e_R(2) *= _yaw_w;
-
-	/*
-	 * Fixed attitude gain.
-	 */
-	const Vector3f k_R(
-		10.f,
-		10.f,
-		10.f);
-
-	Vector3f rate_setpoint =
-		e_R.emult(k_R);
-
-	/*
-	 * Desired yaw-rate feedforward about the inertial z-axis,
-	 * expressed in the current body frame:
-	 *
-	 *     omega_yaw^B =
-	 *       R^T e3 yaw_rate_sp
-	 */
-	if (PX4_ISFINITE(_yawspeed_setpoint)) {
-		const Vector3f yaw_axis_body =
-			R.transpose() * e3;
-
-		rate_setpoint +=
-			yaw_axis_body
-			* _yawspeed_setpoint;
-	}
-
-	/*
-	 * Apply the existing PX4 body-rate limits.
-	 */
-	for (int i = 0; i < 3; i++) {
-		rate_setpoint(i) =
-			math::constrain(
-				rate_setpoint(i),
-				-_rate_limit(i),
-				_rate_limit(i));
-	}
-
-	return rate_setpoint;
-}
-
-
-/*
- * New geometric angular-acceleration controller.
- *
- *     dot(omega)* =
- *       K_R e_R
- *       + K_omega(R^T R_d omega_d - omega)
- */
-Vector3f AttitudeControl::update(
-	const Dcmf &R,
-	const Vector3f &angular_velocity) const
-{
 	const Dcmf &R_d =
 		_attitude_setpoint_R;
 
@@ -414,10 +322,7 @@ Vector3f AttitudeControl::update(
 	 *
 	 *     omega_d_current - omega
 	 */
-	//const Vector3f angular_velocity_correction =
-	//	omega_d_current
-	//	- angular_velocity;
-
+	const Vector3f angular_velocity_correction = omega_d_current;
 	/*
 	 * Fixed gains:
 	 *
@@ -425,22 +330,31 @@ Vector3f AttitudeControl::update(
 	 *     K_omega = diag(6, 6, 6)
 	 */
 	const Vector3f k_R(
+		25.f,
+		25.f,
+		25.f);
+
+	const Vector3f k_omega(
 		10.f,
 		10.f,
 		10.f);
-
-	const Vector3f k_omega(
-		0.f,
-		0.f,
-		0.f);
 
 	/*
 	 * Desired angular acceleration:
 	 *
 	 *     dot(omega)* =   K_omega*(omega_d - omega)+ K_R*e_R   */
 
-	const Vector3f angular_acceleration_setpoint = omega_d_current
+	const Vector3f angular_acceleration_setpoint = angular_velocity_correction.emult(k_omega)
 							+ e_R.emult(k_R) ;
 
 	return angular_acceleration_setpoint;
 }
+
+
+/*
+ * New geometric angular-acceleration controller.
+ *
+ *     dot(omega)* =
+ *       K_R e_R
+ *       + K_omega(R^T R_d omega_d - omega)
+ */

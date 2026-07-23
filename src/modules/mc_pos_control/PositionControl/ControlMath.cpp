@@ -46,6 +46,7 @@ namespace ControlMath
 {
 void thrustToAttitude(
 	const Vector3f &thr_sp,
+	const Vector3f &b3_d,
 	const float yaw_sp,
 	vehicle_attitude_setpoint_s &att_sp)
 {
@@ -60,7 +61,7 @@ void thrustToAttitude(
 	 *
 	 *     b3_d = -thr_sp / ||thr_sp||
 	 */
-	bodyzToAttitude(-thr_sp, yaw_sp, att_sp);
+	bodyzToAttitude(b3_d, yaw_sp, att_sp);
 
 	/*
 	 * PX4 collective thrust is applied along negative body z.
@@ -100,7 +101,7 @@ void bodyzToAttitude(
 		b3_d = e3;
 	}
 
-	b3_d.normalize();
+	//b3_d.normalize();
 
 	/*
 	 * Desired heading direction:
@@ -120,39 +121,6 @@ void bodyzToAttitude(
 	 */
 	Vector3f b2_d = b3_d % b1_c;
 
-	/*
-	 * Singularity:
-	 *
-	 * b3_d and b1_c can become parallel when the requested thrust
-	 * direction is horizontal and aligned with the desired heading.
-	 *
-	 * In that case, use the desired heading-normal direction:
-	 *
-	 *     b2_c = [-sin(yaw_d), cos(yaw_d), 0]^T
-	 */
-	if (b2_d.norm_squared() < 1e-6f) {
-		const Vector3f b2_c(
-			-sinf(yaw_sp),
-			 cosf(yaw_sp),
-			 0.f
-		);
-
-		/*
-		 * Construct an axis orthogonal to b3_d using b2_c.
-		 */
-		Vector3f b1_fallback = b2_c % b3_d;
-
-		if (b1_fallback.norm_squared() < 1e-6f) {
-			/*
-			 * Last-resort fallback for a numerically degenerate case.
-			 */
-			b1_fallback = Vector3f(1.f, 0.f, 0.f);
-		}
-
-		b1_fallback.normalize();
-
-		b2_d = b3_d % b1_fallback;
-	}
 
 	b2_d.normalize();
 

@@ -72,6 +72,21 @@ void PositionControl::setHorizontalThrustMargin(const float margin)
 	_lim_thr_xy_margin = margin;
 }
 
+
+void PositionControl::setAttitude(const matrix::Quatf &q)
+{
+	if (!q.isAllFinite()
+	    || q.norm_squared() < 1e-6f) {
+		return;
+	}
+
+	matrix::Quatf q_normalized = q;
+	q_normalized.normalize();
+
+	_R = matrix::Dcmf(q_normalized);
+}
+
+
 void PositionControl::updateHoverThrust(const float hover_thrust_new)
 {
 	// Given that the equation for thrust is T = a_sp * Th / g - Th
@@ -104,6 +119,7 @@ void PositionControl::setInputSetpoint(const trajectory_setpoint_s &setpoint)
 	_yaw_sp = setpoint.yaw;
 	_yawspeed_sp = setpoint.yawspeed;
 }
+
 
 bool PositionControl::update(const float dt)
 {
@@ -180,59 +196,97 @@ void PositionControl::_velocityControl(const float dt)
 void PositionControl::_accelerationControl()
 {
 	const Vector3f e3(0.f, 0.f, 1.f);
-	static constexpr float _vehicle_mass  = 1.5f;
 
-	/*
-	 * Physical desired thrust force:
-	 *
-	 *     F_d = m * (g * e3 - a_sp)
-	 */
-	Vector3f desired_force =
-		_vehicle_mass * (CONSTANTS_ONE_G * e3 - _acc_sp);
+/*
+ * Desired specific-force direction:
+ *
+ *     g*e3 - a_sp
+ */
+const Vector3f specific_thrust_direction =
+	CONSTANTS_ONE_G * e3 - _acc_sp;
 
+/*
+ * Desired body-z axis:
+ *
+ *     R_d*e3 = (g*e3 - a_sp) / ||g*e3 - a_sp||
+ */
+Vector3f R_d_e3 = e3;
 
-	/*
-	 * Desired body z-axis:
-	 *
-	 *     b3_d = R_d * e3 = F_d / ||F_d||
-	 */
-	Vector3f R_d_e3 = desired_force.normalized();
-
-	ControlMath::limitTilt(R_d_e3, e3, _lim_tilt);
-
-	/*
-	 * Physical thrust magnitude in newtons:
-	 *
-	 *     f_z = F_d^T * R_d * e3
-	 */
-	const float fz_newtons =
-		desired_force.dot(R_d_e3);
-
-	/*
-	 * Convert thrust in newtons to PX4 normalized thrust.
-	 *
-	 * Hover:
-	 *
-	 *     mg  <-->  hover_thrust
-	 */
-	float fz_normalized =
-		-_hover_thrust
-		* fz_newtons
-		/ (_vehicle_mass * CONSTANTS_ONE_G);
-
-	fz_normalized = math::constrain(
-				fz_normalized,
-				-_lim_thr_max,
-				-_lim_thr_min);
-
-	/*
-	 * Normalized thrust vector:
-	 *
-	 *     T_sp = fz_normalized * R_d * e3
-	 */
-	_thr_sp = fz_normalized * R_d_e3;
+if (specific_thrust_direction.norm_squared() > 1e-6f) {
+	R_d_e3 = specific_thrust_direction.normalized();
 }
 
+/*
+ * Limit the desired tilt.
+ */
+ControlMath::limitTilt(R_d_e3, e3, _lim_tilt);
+
+/*
+ * Current body-z axis expressed in the NED frame:
+ *
+ *     R*e3
+ */
+Vector3f R_e3 = _R.col(2);
+
+if (!R_e3.isAllFinite()
+    || R_e3.norm_squared() < 1e-6f) {
+
+	R_e3 = e3;
+}
+
+R_e3.normalize();
+
+/*
+ * Actual translational dynamics:
+ *
+ *     m*a = m*g*e3 + R*fz*e3
+ *
+ * Projecting the desired translational force onto the current
+ * thrust direction R*e3 gives:
+ *
+ *     fz_d
+ *       = m*(a_sp - g*e3)^T * R*e3
+ *
+ *       = -m*(g*e3 - a_sp)^T * R*e3
+ *
+ * PX4 normalized thrust:
+ *
+ *     -m*g  <-->  -hover_thrust
+ *
+ * Therefore:
+ *
+ *     fz_normalized
+ *       = -hover_thrust/g
+ *         * (g*e3 - a_sp)^T * R*e3
+ */
+float fz_normalized =
+	-_hover_thrust
+	* specific_thrust_direction.dot(R_e3)
+	/ CONSTANTS_ONE_G;
+
+/*
+ * More negative means more collective thrust.
+ */
+fz_normalized = math::constrain(
+	fz_normalized,
+	-_lim_thr_max,
+	-_lim_thr_min
+);
+
+/*
+ * The commanded thrust direction must remain the desired one:
+ *
+ *     T_sp = fz_normalized * R_d*e3
+ *
+ * ControlMath::thrustToAttitude() will recover:
+ *
+ *     R_d*e3 = -T_sp / ||T_sp||
+ *
+ * because fz_normalized is negative.
+ */
+_thr_sp = fz_normalized *e3;
+b3_d = R_d_e3;
+}
 bool PositionControl::_inputValid()
 {
 	bool valid = true;
@@ -277,6 +331,6 @@ void PositionControl::getLocalPositionSetpoint(vehicle_local_position_setpoint_s
 
 void PositionControl::getAttitudeSetpoint(vehicle_attitude_setpoint_s &attitude_setpoint) const
 {
-	ControlMath::thrustToAttitude(_thr_sp, _yaw_sp, attitude_setpoint);
+	ControlMath::thrustToAttitude(_thr_sp  ,b3_d, _yaw_sp, attitude_setpoint);
 	attitude_setpoint.yaw_sp_move_rate = _yawspeed_sp;
 }

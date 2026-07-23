@@ -51,7 +51,7 @@ namespace ControlMath
  * @param yaw_sp the desired yaw
  * @param att_sp attitude setpoint to fill
  */
-void thrustToAttitude(const matrix::Vector3f &thr_sp, const float yaw_sp, vehicle_attitude_setpoint_s &att_sp);
+void thrustToAttitude(const matrix::Vector3f &R_d_e3, const matrix::Vector3f &b3_d, const float yaw_sp, vehicle_attitude_setpoint_s &att_sp);
 
 /**
  * Limits the tilt angle between two unit vectors
