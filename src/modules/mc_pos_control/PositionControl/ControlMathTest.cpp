@@ -104,10 +104,13 @@ TEST(ControlMathTest, ThrottleAttitudeMapping)
 {
 	/* expected: zero roll, zero pitch, zero yaw, full thr mag
 	 * reason: thrust pointing full upward */
+	// thr is now just the pass-through value for thrust_body (e.g. acc_sp
+	// upstream) and no longer drives attitude -- b3_d does that alone.
 	Vector3f thr{0.f, 0.f, -1.f};
+	Vector3f b3_d{0.f, 0.f, 1.f};
 	float yaw = 0.f;
 	vehicle_attitude_setpoint_s att{};
-	thrustToAttitude(thr, yaw, att);
+	thrustToAttitude(thr, b3_d, yaw, att);
 	EXPECT_FLOAT_EQ(att.q_d[0], 1.f);
 	EXPECT_FLOAT_EQ(att.q_d[1], 0.f);
 	EXPECT_FLOAT_EQ(att.q_d[2], 0.f);
@@ -117,7 +120,7 @@ TEST(ControlMathTest, ThrottleAttitudeMapping)
 	/* expected: same as before but with 90 yaw
 	 * reason: only yaw changed */
 	yaw = M_PI_2_F;
-	thrustToAttitude(thr, yaw, att);
+	thrustToAttitude(thr, b3_d, yaw, att);
 	Eulerf euler_att(Quatf(att.q_d));
 	EXPECT_FLOAT_EQ(euler_att.phi(), 0.f);
 	EXPECT_FLOAT_EQ(euler_att.theta(), 0.f);
@@ -127,8 +130,8 @@ TEST(ControlMathTest, ThrottleAttitudeMapping)
 	/* expected: same as before but roll 180
 	 * reason: thrust points straight down and order Euler
 	 * order is: 1. roll, 2. pitch, 3. yaw */
-	thr = Vector3f(0.f, 0.f, 1.f);
-	thrustToAttitude(thr, yaw, att);
+	b3_d = Vector3f(0.f, 0.f, -1.f);
+	thrustToAttitude(thr, b3_d, yaw, att);
 	Eulerf euler_att2(Quatf(att.q_d));
 	EXPECT_FLOAT_EQ(std::abs(euler_att2.phi()), std::abs(M_PI_F));
 	EXPECT_FLOAT_EQ(euler_att2.theta(), 0.f);
